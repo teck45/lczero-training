@@ -1,20 +1,20 @@
 %YAML 1.2
 ---
 
-name: 'lc0apv4_t03'
-gpu: 1
+name: 'lc0apv4_t01'
+gpu: 0
 
 dataset:
-    input: '/media/datadrive01/Chess/lc0/data/t75data/*/'
+    input: 'lc0/data/t75data/*/'
     train_ratio: 0.90
     num_chunks: 10000000
     allow_less_chunks: true
     train_workers: 12
     test_workers: 8
-    input_validation: '/media/datadrive01/Chess/lc0/data/validation_data(t75)/'
+    input_validation: 'lc0/data/validation_data'
 
 training:
-    path: '/media/datadrive01/Chess/lc0/lczero-training/showboat_nets'
+    path: 'lc0/lczero-training/prototype_nets'
     num_test_positions: 10000
     batch_size: 1024
     num_batch_splits: 4
