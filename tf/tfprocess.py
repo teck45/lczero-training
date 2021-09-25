@@ -18,11 +18,11 @@
 
 import numpy as np
 import os
-import random
 import tensorflow as tf
 import time
 import bisect
 import lc0_az_policy_map
+import attention_policy_map as apm
 import proto.net_pb2 as pb
 from functools import reduce
 import operator
@@ -58,6 +58,20 @@ class ApplyPolicyMap(tf.keras.layers.Layer):
                          tf.cast(self.fc1, h_conv_pol_flat.dtype))
 
 
+class ApplyAttentionPolicyMap(tf.keras.layers.Layer):
+    def __init__(self, **kwargs):
+        super(ApplyAttentionPolicyMap, self).__init__(**kwargs)
+        self.fc1 = tf.constant(apm.make_map())
+
+    def call(self, logits):
+        logits = tf.reshape(logits, [-1, 64 * 64])  # 64 * 88 <- for pawn promotion concept
+        legal_logits = tf.matmul(logits, tf.cast(self.fc1, logits.dtype))
+        # comment the next two lines, and un-comment the third for pawn promotion concept
+        temp_promotions = tf.zeros([tf.shape(legal_logits)[0], 66], dtype=logits.dtype)  # <- set promotion logits to 0
+        return tf.concat([legal_logits, temp_promotions], axis=1)
+        # return legal_logits
+
+
 class TFProcess:
     def __init__(self, cfg):
         self.cfg = cfg
@@ -70,6 +84,15 @@ class TFProcess:
         self.RESIDUAL_BLOCKS = self.cfg['model']['residual_blocks']
         self.SE_ratio = self.cfg['model']['se_ratio']
         self.policy_channels = self.cfg['model'].get('policy_channels', 32)
+        #########
+        self.emb_size_pol = self.cfg['model'].get('emb_size_pol', 128)
+        self.enc_layers_pol = self.cfg['model'].get('enc_layers_pol', 0)
+        self.dff_pol_enc = self.cfg['model'].get('dff_pol_enc', 512)
+        self.d_model_pol_enc = self.cfg['model'].get('d_model_pol_enc', 256)
+        self.n_heads_pol_enc = self.cfg['model'].get('n_heads_pol_enc', 2)
+        self.d_model_pol_hd = self.cfg['model'].get('d_model_pol_hd', 256)
+        self.n_heads_pol_hd = self.cfg['model'].get('n_heads_pol_hd', 1)
+        #########
         precision = self.cfg['training'].get('precision', 'single')
         loss_scale = self.cfg['training'].get('loss_scale', 128)
         self.virtual_batch_size = self.cfg['model'].get(
@@ -99,6 +122,8 @@ class TFProcess:
             self.POLICY_HEAD = pb.NetworkFormat.POLICY_CLASSICAL
         elif policy_head == "convolution":
             self.POLICY_HEAD = pb.NetworkFormat.POLICY_CONVOLUTION
+        elif policy_head == "attention":
+            self.POLICY_HEAD = pb.NetworkFormat.POLICY_ATTENTION
         else:
             raise ValueError(
                 "Unknown policy head format: {}".format(policy_head))
@@ -182,6 +207,10 @@ class TFProcess:
                                        trainable=False,
                                        dtype=tf.int64)
 
+        # ignore this -- from earlier discontinued testing on replacing residual stack
+        # from Arcturus.constants import POS_ENC, W_CASTLE_OOO, W_CASTLE_OO, B_CASTLE_OOO, B_CASTLE_OO
+        # self.cc = [W_CASTLE_OOO, W_CASTLE_OO, B_CASTLE_OOO, B_CASTLE_OO, POS_ENC]
+
     def init_v2(self, train_dataset, test_dataset, validation_dataset=None):
         if self.strategy is not None:
             self.train_dataset = self.strategy.experimental_distribute_dataset(
@@ -193,7 +222,7 @@ class TFProcess:
             self.test_dataset = self.strategy.experimental_distribute_dataset(
                 test_dataset)
         else:
-            self.test_dataset = test_dataset
+            self.test_dataset = train_dataset
         self.test_iter = iter(self.test_dataset)
         if self.strategy is not None and validation_dataset is not None:
             self.validation_dataset = self.strategy.experimental_distribute_dataset(
@@ -211,14 +240,33 @@ class TFProcess:
         self.l2reg = tf.keras.regularizers.l2(l=0.5 * (0.0001))
         input_var = tf.keras.Input(shape=(112, 8 * 8))
         x_planes = tf.keras.layers.Reshape([112, 8, 8])(input_var)
-        policy, value, moves_left = self.construct_net_v2(x_planes)
+        if self.POLICY_HEAD == pb.NetworkFormat.POLICY_ATTENTION:
+            policy, value, moves_left, attn_wts = self.construct_net_v2(x_planes)
+        else:
+            policy, value, moves_left = self.construct_net_v2(x_planes)
         if self.moves_left:
-            outputs = [policy, value, moves_left]
+            if self.POLICY_HEAD == pb.NetworkFormat.POLICY_ATTENTION:
+                outputs = [policy, value, moves_left, attn_wts]
+            else:
+                outputs = [policy, value, moves_left]
+        elif self.POLICY_HEAD == pb.NetworkFormat.POLICY_ATTENTION:
+            outputs = [policy, value, attn_wts]
         else:
             outputs = [policy, value]
         self.model = tf.keras.Model(inputs=input_var, outputs=outputs)
+        # ignore this -- from earlier discontinued testing on replacing residual stack
+        # import Arcturus.constants as c
+        # import Arcturus.arcturus_model as am
+        # self.model = am.Net(num_enc_layers=4, emb_size=512, d_model=1024, num_heads=8, dff=2048,
+        #                     sq_emb=256, tcv=512, vh_layers=3, vh_width=128, tempreg=self.l2reg)
+        # self.model = am.Net(num_enc_layers=8, emb_size=256, d_model=512, num_heads=8, dff=1024,
+        #                     sq_emb=256, tcv=512, vh_layers=3, vh_width=128, tempreg=self.l2reg)
+        # self.model = am.Net(num_enc_layers=8, emb_size=128, d_model=252, num_heads=12, dff=512,
+        #                     sq_emb=128, tcv=512, vh_layers=3, vh_width=128, tempreg=self.l2reg)
+        # self.model(tf.concat([c.POS_ENC, c.INIT_TOKENS], axis=2))
+        print(self.model.summary())
 
-        # swa_count initialized reguardless to make checkpoint code simpler.
+        # swa_count initialized regardless to make checkpoint code simpler.
         self.swa_count = tf.Variable(0., name='swa_count', trainable=False)
         self.swa_weights = None
         if self.swa_enabled:
@@ -531,7 +579,8 @@ class TFProcess:
         self.profiling_start_step = None
 
         total_steps = self.cfg['training']['total_steps']
-        for _ in range(steps % total_steps, total_steps):
+        for i in range(steps % total_steps, total_steps):
+            print("step {}".format(i))
             self.process_v2(batch_size,
                             test_batches,
                             batch_splits=batch_splits)
@@ -542,6 +591,9 @@ class TFProcess:
 
     @tf.function()
     def process_inner_loop(self, x, y, z, q, m):
+        # ignore this -- from earlier discontinued testing on replacing residual stack
+        ### CONVERT X TO TOKEN INPUT ###
+        # x = self.planes_to_tokens(x)
         with tf.GradientTape() as tape:
             outputs = self.model(x, training=True)
             policy = outputs[0]
@@ -572,6 +624,9 @@ class TFProcess:
 
     @tf.function()
     def strategy_process_inner_loop(self, x, y, z, q, m):
+        # ignore this -- from earlier discontinued testing on replacing residual stack
+        ### CONVERT X TO TOKEN INPUT ###
+        # x = self.planes_to_tokens(x)
         policy_loss, value_loss, mse_loss, moves_left_loss, reg_term, new_grads = self.strategy.run(
             self.process_inner_loop, args=(x, y, z, q, m))
         policy_loss = self.strategy.reduce(tf.distribute.ReduceOp.MEAN,
@@ -592,18 +647,13 @@ class TFProcess:
         return policy_loss, value_loss, mse_loss, moves_left_loss, reg_term, new_grads
 
     def apply_grads(self, grads, effective_batch_splits):
-        grads = [
-            g[0] for g in self.orig_optimizer.gradient_aggregator(
-                zip(grads, self.model.trainable_weights))
-        ]
         if self.loss_scale != 1:
             grads = self.optimizer.get_unscaled_gradients(grads)
         max_grad_norm = self.cfg['training'].get(
             'max_grad_norm', 10000.0) * effective_batch_splits
         grads, grad_norm = tf.clip_by_global_norm(grads, max_grad_norm)
         self.optimizer.apply_gradients(zip(grads,
-                                           self.model.trainable_weights),
-                                       experimental_aggregate_gradients=False)
+                                           self.model.trainable_weights))
         return grad_norm
 
     @tf.function()
@@ -626,8 +676,8 @@ class TFProcess:
     def train_step(self, steps, batch_size, batch_splits):
         # need to add 1 to steps because steps will be incremented after gradient update
         if (steps +
-                1) % self.cfg['training']['train_avg_report_steps'] == 0 or (
-                    steps + 1) % self.cfg['training']['total_steps'] == 0:
+            1) % self.cfg['training']['train_avg_report_steps'] == 0 or (
+                steps + 1) % self.cfg['training']['total_steps'] == 0:
             before_weights = self.read_weights()
 
         # Run training for this batch
@@ -678,8 +728,8 @@ class TFProcess:
         steps = self.global_step.read_value()
 
         if steps % self.cfg['training'][
-                'train_avg_report_steps'] == 0 or steps % self.cfg['training'][
-                    'total_steps'] == 0:
+            'train_avg_report_steps'] == 0 or steps % self.cfg['training'][
+            'total_steps'] == 0:
             pol_loss_w = self.cfg['training']['policy_loss_weight']
             val_loss_w = self.cfg['training']['value_loss_weight']
             moves_loss_w = self.cfg['training']['moves_left_loss_weight']
@@ -697,7 +747,7 @@ class TFProcess:
             avg_reg_term = np.mean(self.avg_reg_term or [0])
             print(
                 "step {}, lr={:g} policy={:g} value={:g} mse={:g} moves={:g} reg={:g} total={:g} ({:g} pos/s)"
-                .format(
+                    .format(
                     steps, self.lr, avg_policy_loss, avg_value_loss,
                     avg_mse_loss, avg_moves_left_loss, avg_reg_term,
                     pol_loss_w * avg_policy_loss +
@@ -737,7 +787,7 @@ class TFProcess:
         # By default disabled since 0 != 10.
         if steps % self.cfg['training'].get('profile_step_freq',
                                             1) == self.cfg['training'].get(
-                                                'profile_step_offset', 10):
+            'profile_step_offset', 10):
             self.profiling_start_step = steps
             tf.profiler.experimental.start(
                 os.path.join(os.getcwd(),
@@ -770,7 +820,7 @@ class TFProcess:
         # Calculate test values every 'test_steps', but also ensure there is
         # one at the final step so the delta to the first step can be calculted.
         if steps % self.cfg['training']['test_steps'] == 0 or steps % self.cfg[
-                'training']['total_steps'] == 0:
+            'training']['total_steps'] == 0:
             with tf.profiler.experimental.Trace("Test", step_num=steps):
                 self.calculate_test_summaries_v2(test_batches, steps)
                 if self.swa_enabled:
@@ -798,6 +848,9 @@ class TFProcess:
             swa_path = path + "-swa-" + str(evaled_steps)
             self.net.pb.training_params.training_steps = evaled_steps
             self.save_leelaz_weights_v2(leela_path)
+            ###
+            # self.model.save(leela_path)
+            ###
             if self.swa_enabled:
                 self.save_swa_weights_v2(swa_path)
 
@@ -877,6 +930,79 @@ class TFProcess:
                                          axis=None)
         return policy_loss, value_loss, moves_left_loss, mse_loss, policy_accuracy, value_accuracy, moves_left_mean_error, policy_entropy, policy_ul
 
+    # ignore this -- from earlier discontinued testing on replacing residual stack
+    # @tf.function()
+    # def planes_to_tokens(self, stack):
+    #     our_pawns = stack[:, 0, :]
+    #     our_knights = stack[:, 1, :]
+    #     our_diagonals = stack[:, 2, :] + stack[:, 4, :]
+    #     our_orthogonals = stack[:, 3, :] + stack[:, 4, :]
+    #     our_kings = stack[:, 5, :]
+    #
+    #     their_pawns = stack[:, 6, :]
+    #     their_knights = stack[:, 7, :]
+    #     their_diagonals = stack[:, 8, :] + stack[:, 10, :]
+    #     their_orthogonals = stack[:, 9, :] + stack[:, 10, :]
+    #     their_kings = stack[:, 11, :]
+    #
+    #     our_pieces = tf.clip_by_value(our_pawns + our_knights + our_diagonals + our_orthogonals + our_kings,
+    #                                   clip_value_min=0., clip_value_max=1.)
+    #     their_pieces = tf.clip_by_value(their_pawns + their_knights + their_diagonals + their_orthogonals + their_kings,
+    #                                     clip_value_min=0., clip_value_max=1.)
+    #
+    #     pawns = our_pawns + their_pawns
+    #     knights = our_knights + their_knights
+    #     diagonals = our_diagonals + their_diagonals
+    #     orthogonals = our_orthogonals + their_orthogonals
+    #     kings = our_kings + their_kings
+    #
+    #     tokens = tf.stack([our_pieces, their_pieces, pawns, knights, orthogonals, diagonals, kings], axis=2) * 3.
+    #     batch_len = tf.shape(tokens)[0]
+    #
+    #     pos_enc = self.cc[4]
+    #     pos_enc = tf.broadcast_to(pos_enc, [batch_len, 64, tf.shape(pos_enc)[2]])
+    #     tokenized = tf.concat([pos_enc, tokens], axis=2)
+    #
+    #     def ones(x): return tf.greater(x, 0)
+    #
+    #     castling_us_ooo = ones(stack[:, 104, 0])
+    #     castling_us_ooo = tf.logical_and(tf.reshape(castling_us_ooo, [-1, 1]),
+    #                                      tf.broadcast_to(tf.greater(self.cc[0], 0), [batch_len, 64]))
+    #     castling_us_oo = ones(stack[:, 105, 0])
+    #     castling_us_oo = tf.logical_and(tf.reshape(castling_us_oo, [-1, 1]),
+    #                                     tf.broadcast_to(tf.greater(self.cc[1], 0), [batch_len, 64]))
+    #     castling_them_ooo = ones(stack[:, 104, 56])
+    #     castling_them_ooo = tf.logical_and(tf.reshape(castling_them_ooo, [-1, 1]),
+    #                                        tf.broadcast_to(tf.greater(self.cc[2], 0), [batch_len, 64]))
+    #     castling_them_oo = ones(stack[:, 105, 56])
+    #     castling_them_oo = tf.logical_and(tf.reshape(castling_them_oo, [-1, 1]),
+    #                                       tf.broadcast_to(tf.greater(self.cc[3], 0), [batch_len, 64]))
+    #
+    #     castle_us = tf.logical_or(castling_us_ooo, castling_us_oo)
+    #     castle_them = tf.logical_or(castling_them_ooo, castling_them_oo)
+    #     castling = tf.logical_or(castle_us, castle_them)
+    #
+    #     their_pawns_r7 = ones(their_pawns[:, 48:56])
+    #     their_pawns_r5 = ones(their_pawns[:, 32:40])
+    #     their_pawns_prev_r7 = ones(stack[:, 19, 48:56])
+    #     their_pawns_prev_r5 = ones(stack[:, 19, 32:40])
+    #
+    #     ep_file = tf.logical_and(tf.math.logical_xor(their_pawns_r5, their_pawns_prev_r5),
+    #                              tf.math.logical_xor(their_pawns_r7, their_pawns_prev_r7))
+    #     ep = tf.concat([tf.greater(tf.zeros([batch_len, 40]), 0),
+    #                     ep_file,
+    #                     tf.greater(tf.zeros([batch_len, 16]), 0)],
+    #                    axis=1)
+    #
+    #     spec_move = tf.zeros_like(pawns)
+    #     spec_move_filter = tf.logical_or(castling, ep)
+    #     legal_spec = tf.ones_like(pawns)
+    #
+    #     spec_move = tf.where(spec_move_filter, legal_spec, spec_move)
+    #
+    #     return tf.concat([tokenized, tf.expand_dims(spec_move, axis=2)], axis=2)
+    ##########
+
     def calculate_test_summaries_v2(self, test_batches, steps):
         sum_policy_accuracy = 0
         sum_value_accuracy = 0
@@ -889,6 +1015,9 @@ class TFProcess:
         sum_policy_ul = 0
         for _ in range(0, test_batches):
             x, y, z, q, m = next(self.test_iter)
+            # ignore this -- from earlier discontinued testing on replacing residual stack
+            ### CONVERT X TO TOKEN INPUT ###
+            # x = self.planes_to_tokens(x)
             if self.strategy is not None:
                 policy_loss, value_loss, moves_left_loss, mse_loss, policy_accuracy, value_accuracy, moves_left_mean_error, policy_entropy, policy_ul = self.strategy_calculate_test_summaries_inner_loop(
                     x, y, z, q, m)
@@ -949,8 +1078,10 @@ class TFProcess:
                 tf.summary.histogram(w.name, w, step=steps)
         self.test_writer.flush()
 
-        print("step {}, policy={:g} value={:g} policy accuracy={:g}% value accuracy={:g}% mse={:g} policy entropy={:g} policy ul={:g}".\
-            format(steps, sum_policy, sum_value, sum_policy_accuracy, sum_value_accuracy, sum_mse, sum_policy_entropy, sum_policy_ul), end = '')
+        print(
+            "step {}, policy={:g} value={:g} policy accuracy={:g}% value accuracy={:g}% mse={:g} policy entropy={:g} policy ul={:g}". \
+            format(steps, sum_policy, sum_value, sum_policy_accuracy, sum_value_accuracy, sum_mse, sum_policy_entropy,
+                   sum_policy_ul), end='')
 
         if self.moves_left:
             print(" moves={:g} moves mean={:g}".format(
@@ -981,6 +1112,9 @@ class TFProcess:
         sum_policy_ul = 0
         counter = 0
         for (x, y, z, q, m) in self.validation_dataset:
+            # ignore this -- from earlier discontinued testing on replacing residual stack
+            ### CONVERT X TO TOKEN INPUT ###
+            # x = self.planes_to_tokens(x)
             if self.strategy is not None:
                 policy_loss, value_loss, moves_left_loss, mse_loss, policy_accuracy, value_accuracy, moves_left_mean_error, policy_entropy, policy_ul = self.strategy_calculate_test_summaries_inner_loop(
                     x, y, z, q, m)
@@ -1035,8 +1169,10 @@ class TFProcess:
                                   step=steps)
         self.validation_writer.flush()
 
-        print("step {}, validation: policy={:g} value={:g} policy accuracy={:g}% value accuracy={:g}% mse={:g} policy entropy={:g} policy ul={:g}".\
-            format(steps, sum_policy, sum_value, sum_policy_accuracy, sum_value_accuracy, sum_mse, sum_policy_entropy, sum_policy_ul), end='')
+        print(
+            "step {}, validation: policy={:g} value={:g} policy accuracy={:g}% value accuracy={:g}% mse={:g} policy entropy={:g} policy ul={:g}". \
+            format(steps, sum_policy, sum_value, sum_policy_accuracy, sum_value_accuracy, sum_mse, sum_policy_entropy,
+                   sum_policy_ul), end='')
 
         if self.moves_left:
             print(" moves={:g} moves mean={:g}".format(
@@ -1086,6 +1222,9 @@ class TFProcess:
         for (swa, w) in zip(self.swa_weights, self.model.weights):
             w.assign(swa.read_value())
         self.save_leelaz_weights_v2(filename)
+        ###
+        # self.model.save(filename)
+        ###
         for (old, w) in zip(backup, self.model.weights):
             w.assign(old)
 
@@ -1182,6 +1321,61 @@ class TFProcess:
         return tf.keras.layers.Activation('relu')(tf.keras.layers.add(
             [inputs, out2]))
 
+    ### THE FOLLOWING IS NEW CODE FOR ATTENTION AND ENCODER LAYERS ###
+    @staticmethod
+    def scaled_dot_product_attention(q, k, v):
+        matmul_qk = tf.matmul(q, k, transpose_b=True)
+        dk = tf.cast(tf.shape(k)[-1], k.dtype)
+        scaled_attention_logits = matmul_qk / tf.math.sqrt(dk)
+        attention_weights = tf.nn.softmax(scaled_attention_logits, axis=-1)
+        output = tf.matmul(attention_weights, v)
+        return output, attention_weights
+
+    @staticmethod
+    def split_heads(inputs, batch_size, num_heads, depth):
+        if num_heads < 2:
+            return inputs
+        reshaped = tf.reshape(inputs, (batch_size, -1, num_heads, depth))
+        return tf.transpose(reshaped, perm=[0, 2, 1, 3]) #(batch_size, num_heads, seq_len, depth)
+
+    # multi-head attention in encoder layers
+    def mha(self, inputs, emb_size, d_model, num_heads, name):
+        assert d_model % num_heads == 0
+        depth = d_model // num_heads
+        q = tf.keras.layers.Dense(d_model, kernel_initializer='glorot_normal', kernel_regularizer=self.l2reg,
+                                  name=name + '/wq')(inputs)
+        k = tf.keras.layers.Dense(d_model, kernel_initializer='glorot_normal', kernel_regularizer=self.l2reg,
+                                  name=name + '/wk')(inputs)
+        v = tf.keras.layers.Dense(d_model, kernel_initializer='glorot_normal', kernel_regularizer=self.l2reg,
+                                  name=name + '/wv')(inputs)
+        batch_size = tf.shape(q)[0]
+        q = self.split_heads(q, batch_size, num_heads, depth)
+        k = self.split_heads(k, batch_size, num_heads, depth)
+        v = self.split_heads(v, batch_size, num_heads, depth)
+        scaled_attention, attention_weights = self.scaled_dot_product_attention(q, k, v)
+        if num_heads > 1:
+            scaled_attention = tf.transpose(scaled_attention, perm=[0, 2, 1, 3])
+            scaled_attention = tf.reshape(scaled_attention, (batch_size, -1, d_model))  # concatenate heads
+        output = tf.keras.layers.Dense(emb_size, kernel_initializer='glorot_normal', kernel_regularizer=self.l2reg,
+                                       name=name + "/dense")(scaled_attention)
+        return output, attention_weights
+
+    def ffn(self, inputs, emb_size, dff, name):
+        dense1 = tf.keras.layers.Dense(dff, kernel_initializer='glorot_normal', kernel_regularizer=self.l2reg,
+                                       activation='selu', name=name + "/dense1")(inputs)
+        return tf.keras.layers.Dense(emb_size, kernel_initializer='glorot_normal', kernel_regularizer=self.l2reg,
+                                     name=name + "/dense2")(dense1)
+
+    def encoder_layer(self, inputs, emb_size, d_model, num_heads, dff, name, rate=0.1, training=False):
+        attn_output, attn_wts = self.mha(inputs, emb_size, d_model, num_heads, name=name + "/mha")
+        # skip connection
+        out1 = tf.keras.layers.LayerNormalization(epsilon=1e-6, name=name + "/ln1")(inputs + attn_output)
+        # dff is the hidden layer size, emb_size is the input and output channel size of the encoder layer
+        ffn_output = self.ffn(out1, emb_size, dff, name=name + "/ffn")
+        # skip connection
+        out2 = tf.keras.layers.LayerNormalization(epsilon=1e-6, name=name + "/ln2")(out1 + ffn_output)
+        return out2, attn_wts
+
     def construct_net_v2(self, inputs):
         flow = self.conv_block_v2(inputs,
                                   filter_size=3,
@@ -1210,7 +1404,7 @@ class TFProcess:
                 bias_regularizer=self.l2reg,
                 data_format='channels_first',
                 name='policy')(conv_pol)
-            h_fc1 = ApplyPolicyMap()(conv_pol2)
+            h_fc1 = ApplyPolicyMap()(conv_pol2)  # 80x8x8
         elif self.POLICY_HEAD == pb.NetworkFormat.POLICY_CLASSICAL:
             conv_pol = self.conv_block_v2(flow,
                                           filter_size=1,
@@ -1222,6 +1416,97 @@ class TFProcess:
                                           kernel_regularizer=self.l2reg,
                                           bias_regularizer=self.l2reg,
                                           name='policy/dense')(h_conv_pol_flat)
+        ### SELF-ATTENTION POLICY ###
+        elif self.POLICY_HEAD == pb.NetworkFormat.POLICY_ATTENTION:
+            # transpose and reshape
+            tokens = tf.transpose(flow, perm=[0, 2, 3, 1])
+            tokens = tf.reshape(tokens, [-1, 64, self.RESIDUAL_FILTERS])
+
+            # 'embedding' layer: found to increase training perf., but using multiple does not increase perf. further
+            tokens = tf.keras.layers.Dense(self.emb_size_pol, kernel_initializer='glorot_normal',
+                                           kernel_regularizer=self.l2reg, activation='selu',
+                                           name='policy/embedding')(tokens)
+
+            """PAWN PROMOTION FIRST CONCEPT, DOES NOT WORK WITH ENCODER LAYERS YET"""
+            # r8 = tokens[:, -8:, :]
+            # r8q = tf.keras.layers.Dense(self.emb_size_pol, kernel_initializer='glorot_normal',
+            #                             kernel_regularizer=self.l2reg, activation='selu',
+            #                             name='policy/embedding/pp_queen')(r8)
+            # r8r = tf.keras.layers.Dense(self.emb_size_pol, kernel_initializer='glorot_normal',
+            #                             kernel_regularizer=self.l2reg, activation='selu',
+            #                             name='policy/embedding/pp_rook')(r8)
+            # r8b = tf.keras.layers.Dense(self.emb_size_pol, kernel_initializer='glorot_normal',
+            #                             kernel_regularizer=self.l2reg, activation='selu',
+            #                             name='policy/embedding/pp_bishop')(r8)
+            # key_tokens = tf.concat([tokens, r8b, r8r, r8q], axis=1)
+
+            """ENCODER LAYERS (default none: no discovered performance benefit yet, large hit to speed)"""
+            # resid = tokens  # for global skip connection, untested but was helpful when testing on transformer body
+            attn_wts = []
+            for i in range(self.enc_layers_pol):
+                tokens, attn_wts_l = self.encoder_layer(tokens,
+                                                        self.emb_size_pol, self.d_model_pol_enc, self.n_heads_pol_enc,
+                                                        self.dff_pol_enc, name='policy/enc_layer/' + str(i),
+                                                        rate=0.1, training=True)
+                attn_wts.append(attn_wts_l)
+                # for global skip connection
+                # tokens = tf.keras.layers.LayerNormalization(epsilon=1e-6, name='policy/global_ln/' + str(i))\
+                #     ((1/tf.math.log(i+1.718282))*resid + tokens)
+
+            # TODO: test only computing query vectors for "our" pieces for performance improvement
+            q = tf.keras.layers.Dense(self.d_model_pol_hd,
+                                      kernel_initializer='glorot_normal',
+                                      kernel_regularizer=self.l2reg,
+                                      name='policy/attention/wq')(tokens)
+            # for pawn promotion concept, change input for this layer from tokens -> key_tokens
+            k = tf.keras.layers.Dense(self.d_model_pol_hd,
+                                      kernel_initializer='glorot_normal',
+                                      kernel_regularizer=self.l2reg,
+                                      name='policy/attention/wk')(tokens)
+
+            # split heads, does nothing if n_heads_pol_hd is 1
+            assert self.d_model_pol_hd % self.n_heads_pol_hd == 0
+            depth = self.d_model_pol_hd // self.n_heads_pol_hd
+            batch_size = tf.shape(q)[0]
+            q = self.split_heads(q, batch_size, self.n_heads_pol_hd, depth)
+            k = self.split_heads(k, batch_size, self.n_heads_pol_hd, depth)
+
+            # compute policy logits
+            matmul_qk = tf.matmul(q, k, transpose_b=True)
+            dk = tf.cast(tf.shape(k)[-1], k.dtype)
+            policy_attn_logits = matmul_qk / tf.math.sqrt(dk)
+
+            # summarize the policy logits from all heads, using one of several methods
+            if self.n_heads_pol_hd > 1:
+                attn_wts.append(policy_attn_logits)
+                """
+                ARITHMETIC MEAN ACROSS ALL HEADS
+                tested, but only a small performance benefit found so far, and only for 2 heads
+                w/2 heads, little to no hit to training speed, 4 & 8 heads saw a small hit to speed
+                >2 heads may work for larger nets, trained for longer, and with larger d_model sizes
+                """
+                policy_attn_logits = tf.math.reduce_mean(policy_attn_logits, axis=1)
+                """SUM ACROSS ALL HEADS (untested)"""
+                # policy_attn_logits = tf.reduce_sum(policy_attn_logits, axis=1)
+                """GEOMETRIC MEAN ACROSS ALL HEADS (crazy idea, untested)"""
+                # signs = tf.reduce_prod(tf.math.sign(policy_attn_logits), axis=1)
+                # policy_attn_logits = tf.math.abs(policy_attn_logits)
+                # USE THIS #
+                # policy_attn_logits = tf.math.exp(tf.math.reduce_mean(tf.math.log(policy_attn_logits), axis=1))
+                # OR THIS #
+                # policy_attn_logits = tf.math.pow(tf.math.reduce_prod(policy_attn_logits, axis=1),
+                #                                  1/self.n_heads_pol_hd)  # this method is probably faster and more
+                #                                                          # precise, but carries with it the small risk
+                #                                                          # of Inf values when summarizing many heads
+                # BEFORE THIS #
+                # policy_attn_logits = tf.math.multiply(policy_attn_logits, signs)
+            attn_wts.append(policy_attn_logits)
+
+            # TODO (after previous TODO): re-embed queries in original squares so output is BATCH_SIZEx64x64
+
+            # apply the new policy map so output becomes (BATCH_SIZE, 1856)
+            h_fc1 = ApplyAttentionPolicyMap()(policy_attn_logits)
+
         else:
             raise ValueError("Unknown policy head type {}".format(
                 self.POLICY_HEAD))
@@ -1272,4 +1557,35 @@ class TFProcess:
         else:
             h_fc5 = None
 
+        # attention weights added as additional output for visualization script -- not necessary for engine to perform
+        if self.POLICY_HEAD == pb.NetworkFormat.POLICY_ATTENTION:
+            return h_fc1, h_fc3, h_fc5, attn_wts
         return h_fc1, h_fc3, h_fc5
+
+
+# some old testing code
+def main(cmd):
+    cfg = yaml.safe_load(cmd.cfg.read())
+    print(yaml.dump(cfg, default_flow_style=False))
+    tfprocess = TFProcess(cfg)
+    tfprocess.init_net_v2()
+    # tfprocess.restore_v2()
+    model = tfprocess.model
+    model.summary()
+
+
+if __name__ == "__main__":
+    import yaml
+    import argparse
+
+    argparser = argparse.ArgumentParser(description= \
+                                            'Tensorflow pipeline for training Leela Chess.')
+    argparser.add_argument('--cfg',
+                           type=argparse.FileType('r'),
+                           help='yaml configuration with training parameters')
+    argparser.add_argument('--output',
+                           type=str,
+                           help='file to store weights in')
+
+    # mp.set_start_method('spawn')
+    main(argparser.parse_args())
