@@ -222,7 +222,7 @@ class TFProcess:
             self.test_dataset = self.strategy.experimental_distribute_dataset(
                 test_dataset)
         else:
-            self.test_dataset = train_dataset
+            self.test_dataset = test_dataset
         self.test_iter = iter(self.test_dataset)
         if self.strategy is not None and validation_dataset is not None:
             self.validation_dataset = self.strategy.experimental_distribute_dataset(
@@ -240,6 +240,7 @@ class TFProcess:
         self.l2reg = tf.keras.regularizers.l2(l=0.5 * (0.0001))
         input_var = tf.keras.Input(shape=(112, 8 * 8))
         x_planes = tf.keras.layers.Reshape([112, 8, 8])(input_var)
+        # attention weights added as additional output for visualization script -- not necessary for engine to perform
         if self.POLICY_HEAD == pb.NetworkFormat.POLICY_ATTENTION:
             policy, value, moves_left, attn_wts = self.construct_net_v2(x_planes)
         else:
@@ -647,13 +648,18 @@ class TFProcess:
         return policy_loss, value_loss, mse_loss, moves_left_loss, reg_term, new_grads
 
     def apply_grads(self, grads, effective_batch_splits):
+        grads = [
+            g[0] for g in self.orig_optimizer.gradient_aggregator(
+                zip(grads, self.model.trainable_weights))
+        ]
         if self.loss_scale != 1:
             grads = self.optimizer.get_unscaled_gradients(grads)
         max_grad_norm = self.cfg['training'].get(
             'max_grad_norm', 10000.0) * effective_batch_splits
         grads, grad_norm = tf.clip_by_global_norm(grads, max_grad_norm)
         self.optimizer.apply_gradients(zip(grads,
-                                           self.model.trainable_weights))
+                                           self.model.trainable_weights),
+                                       experimental_aggregate_gradients=False)
         return grad_norm
 
     @tf.function()
@@ -676,8 +682,8 @@ class TFProcess:
     def train_step(self, steps, batch_size, batch_splits):
         # need to add 1 to steps because steps will be incremented after gradient update
         if (steps +
-            1) % self.cfg['training']['train_avg_report_steps'] == 0 or (
-                steps + 1) % self.cfg['training']['total_steps'] == 0:
+                1) % self.cfg['training']['train_avg_report_steps'] == 0 or (
+                    steps + 1) % self.cfg['training']['total_steps'] == 0:
             before_weights = self.read_weights()
 
         # Run training for this batch
@@ -728,8 +734,8 @@ class TFProcess:
         steps = self.global_step.read_value()
 
         if steps % self.cfg['training'][
-            'train_avg_report_steps'] == 0 or steps % self.cfg['training'][
-            'total_steps'] == 0:
+                'train_avg_report_steps'] == 0 or steps % self.cfg['training'][
+                    'total_steps'] == 0:
             pol_loss_w = self.cfg['training']['policy_loss_weight']
             val_loss_w = self.cfg['training']['value_loss_weight']
             moves_loss_w = self.cfg['training']['moves_left_loss_weight']
@@ -747,7 +753,7 @@ class TFProcess:
             avg_reg_term = np.mean(self.avg_reg_term or [0])
             print(
                 "step {}, lr={:g} policy={:g} value={:g} mse={:g} moves={:g} reg={:g} total={:g} ({:g} pos/s)"
-                    .format(
+                .format(
                     steps, self.lr, avg_policy_loss, avg_value_loss,
                     avg_mse_loss, avg_moves_left_loss, avg_reg_term,
                     pol_loss_w * avg_policy_loss +
@@ -787,7 +793,7 @@ class TFProcess:
         # By default disabled since 0 != 10.
         if steps % self.cfg['training'].get('profile_step_freq',
                                             1) == self.cfg['training'].get(
-            'profile_step_offset', 10):
+                                                'profile_step_offset', 10):
             self.profiling_start_step = steps
             tf.profiler.experimental.start(
                 os.path.join(os.getcwd(),
@@ -818,9 +824,9 @@ class TFProcess:
             self.update_swa_v2()
 
         # Calculate test values every 'test_steps', but also ensure there is
-        # one at the final step so the delta to the first step can be calculted.
+        # one at the final step so the delta to the first step can be calculated.
         if steps % self.cfg['training']['test_steps'] == 0 or steps % self.cfg[
-            'training']['total_steps'] == 0:
+                'training']['total_steps'] == 0:
             with tf.profiler.experimental.Trace("Test", step_num=steps):
                 self.calculate_test_summaries_v2(test_batches, steps)
                 if self.swa_enabled:
@@ -1078,10 +1084,8 @@ class TFProcess:
                 tf.summary.histogram(w.name, w, step=steps)
         self.test_writer.flush()
 
-        print(
-            "step {}, policy={:g} value={:g} policy accuracy={:g}% value accuracy={:g}% mse={:g} policy entropy={:g} policy ul={:g}". \
-            format(steps, sum_policy, sum_value, sum_policy_accuracy, sum_value_accuracy, sum_mse, sum_policy_entropy,
-                   sum_policy_ul), end='')
+        print("step {}, policy={:g} value={:g} policy accuracy={:g}% value accuracy={:g}% mse={:g} policy entropy={:g} policy ul={:g}".\
+            format(steps, sum_policy, sum_value, sum_policy_accuracy, sum_value_accuracy, sum_mse, sum_policy_entropy, sum_policy_ul), end = '')
 
         if self.moves_left:
             print(" moves={:g} moves mean={:g}".format(
@@ -1169,10 +1173,8 @@ class TFProcess:
                                   step=steps)
         self.validation_writer.flush()
 
-        print(
-            "step {}, validation: policy={:g} value={:g} policy accuracy={:g}% value accuracy={:g}% mse={:g} policy entropy={:g} policy ul={:g}". \
-            format(steps, sum_policy, sum_value, sum_policy_accuracy, sum_value_accuracy, sum_mse, sum_policy_entropy,
-                   sum_policy_ul), end='')
+        print("step {}, validation: policy={:g} value={:g} policy accuracy={:g}% value accuracy={:g}% mse={:g} policy entropy={:g} policy ul={:g}".\
+            format(steps, sum_policy, sum_value, sum_policy_accuracy, sum_value_accuracy, sum_mse, sum_policy_entropy, sum_policy_ul), end='')
 
         if self.moves_left:
             print(" moves={:g} moves mean={:g}".format(
@@ -1366,7 +1368,7 @@ class TFProcess:
         return tf.keras.layers.Dense(emb_size, kernel_initializer='glorot_normal', kernel_regularizer=self.l2reg,
                                      name=name + "/dense2")(dense1)
 
-    def encoder_layer(self, inputs, emb_size, d_model, num_heads, dff, name, rate=0.1, training=False):
+    def encoder_layer(self, inputs, emb_size, d_model, num_heads, dff, name):
         attn_output, attn_wts = self.mha(inputs, emb_size, d_model, num_heads, name=name + "/mha")
         # skip connection
         out1 = tf.keras.layers.LayerNormalization(epsilon=1e-6, name=name + "/ln1")(inputs + attn_output)
@@ -1446,8 +1448,7 @@ class TFProcess:
             for i in range(self.enc_layers_pol):
                 tokens, attn_wts_l = self.encoder_layer(tokens,
                                                         self.emb_size_pol, self.d_model_pol_enc, self.n_heads_pol_enc,
-                                                        self.dff_pol_enc, name='policy/enc_layer/' + str(i),
-                                                        rate=0.1, training=True)
+                                                        self.dff_pol_enc, name='policy/enc_layer/' + str(i))
                 attn_wts.append(attn_wts_l)
                 # for global skip connection
                 # tokens = tf.keras.layers.LayerNormalization(epsilon=1e-6, name='policy/global_ln/' + str(i))\
