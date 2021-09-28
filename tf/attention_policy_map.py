@@ -35,10 +35,11 @@ pawn_promotion = np.array([
     1 + promos
 ])
 
+
 def make_map():
     """theoretically possible put-down squares (numpy array) for each pick-up square (list element).
     squares are [0, 1, ..., 63] for [a1, b1, ..., h8]. squares after 63 are promotion squares (1st draft concept).
-    each successive "row" beyond 63 (ie. 64:72, 72:80, 80:88) are for over-promotions to bishop, rook, and queen;
+    each successive "row" beyond 63 (ie. 64:72, 72:80, 80:88) are for over-promotions to queen, rook, and bishop;
     respectively. a pawn traverse to row 56:64 signifies a "default" promotion to a knight."""
     traversable = []
     for i in range(8):
@@ -109,10 +110,10 @@ def make_map():
 # print(np.shape(z))
 
 
-# 1792 = a7a8q  48*88 + 64 | 1
-# 1793 = a7a8r  48*88 + 72 | 3
+# 1792 = a7a8q  48*88 + 64 |#1
+# 1793 = a7a8r  48*88 + 72 |#3
 # 1794 = a7a8b  48*88 + 80 | 5
-# 1795 = a7b8q  48*88 + 65 | 2
+# 1795 = a7b8q  48*88 + 65 |#2
 # 1796 = a7b8r  48*88 + 73 | 4
 # 1797 = a7b8b  48*88 + 81 | 6
 #

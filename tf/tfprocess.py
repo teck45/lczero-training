@@ -1440,7 +1440,7 @@ class TFProcess:
             # r8b = tf.keras.layers.Dense(self.emb_size_pol, kernel_initializer='glorot_normal',
             #                             kernel_regularizer=self.l2reg, activation='selu',
             #                             name='policy/embedding/pp_bishop')(r8)
-            # key_tokens = tf.concat([tokens, r8b, r8r, r8q], axis=1)
+            # key_tokens = tf.concat([tokens, r8q, r8r, r8b], axis=1)
 
             """ENCODER LAYERS (default none: no discovered performance benefit yet, large hit to speed)"""
             # resid = tokens  # for global skip connection, untested but was helpful when testing on transformer body
