@@ -69,9 +69,10 @@ class ApplyAttentionPolicyMap(tf.keras.layers.Layer):
         # for default night promotion
         promotion_values = tf.constant([1.5, 0.5, -0.5], dtype=logits.dtype)
         promotion_defaults = tf.tile(promotion_values, [22])
+        promotion_defaults = tf.broadcast_to(promotion_defaults, [tf.shape(logits)[0], 66])
         return tf.concat([possible_logits, promotion_defaults], axis=1)
         # for promotion keys, 1st concept
-        # return legal_logits
+        # return possible_logits
 
 
 class TFProcess:
