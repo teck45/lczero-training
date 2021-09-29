@@ -65,10 +65,12 @@ class ApplyAttentionPolicyMap(tf.keras.layers.Layer):
 
     def call(self, logits):
         logits = tf.reshape(logits, [-1, 64 * 64])  # 64 * 88 <- for pawn promotion concept
-        legal_logits = tf.matmul(logits, tf.cast(self.fc1, logits.dtype))
-        # comment the next two lines, and un-comment the third for pawn promotion concept
-        temp_promotions = tf.zeros([tf.shape(legal_logits)[0], 66], dtype=logits.dtype)  # <- set promotion logits to 0
-        return tf.concat([legal_logits, temp_promotions], axis=1)
+        possible_logits = tf.matmul(logits, tf.cast(self.fc1, logits.dtype))
+        # for default night promotion
+        promotion_values = tf.constant([1.5, 0.5, -0.5], dtype=logits.dtype)
+        promotion_defaults = tf.tile(promotion_values, [22])
+        return tf.concat([possible_logits, promotion_defaults], axis=1)
+        # for promotion keys, 1st concept
         # return legal_logits
 
 
@@ -1331,14 +1333,14 @@ class TFProcess:
         scaled_attention_logits = matmul_qk / tf.math.sqrt(dk)
         attention_weights = tf.nn.softmax(scaled_attention_logits, axis=-1)
         output = tf.matmul(attention_weights, v)
-        return output, attention_weights
+        return output, scaled_attention_logits  # now outputs attention weights before softmax for better visualization
 
     @staticmethod
     def split_heads(inputs, batch_size, num_heads, depth):
         if num_heads < 2:
             return inputs
         reshaped = tf.reshape(inputs, (batch_size, -1, num_heads, depth))
-        return tf.transpose(reshaped, perm=[0, 2, 1, 3]) #(batch_size, num_heads, seq_len, depth)
+        return tf.transpose(reshaped, perm=[0, 2, 1, 3])  # (batch_size, num_heads, seq_len, depth)
 
     # multi-head attention in encoder layers
     def mha(self, inputs, emb_size, d_model, num_heads, name):

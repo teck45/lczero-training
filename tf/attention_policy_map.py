@@ -67,7 +67,7 @@ def make_map():
     # print(traversable)
     # print(sum([a.__len__() for a in traversable]))
 
-    # comment this code if using pawn promotion keys
+    # default knight promotion
     z = np.zeros((64*64, 1858-66), dtype=np.int32)
     i = 0
     for pickup_index, putdown_indices in enumerate(traversable):
@@ -76,8 +76,10 @@ def make_map():
                 z[(64*pickup_index)+putdown_index, i] = 1
                 i += 1
 
-    # un-comment this code if using pawn promotion keys
-    # z = np.zeros((64*88, 1858), dtype=np.int32)  # 1858-66
+    # default queen promotion -- probably too difficult under current framework
+
+    # promotion keys -- first concept
+    # z = np.zeros((64*88, 1858), dtype=np.int32)
     # i = 0
     # for pickup_index, putdown_indices in enumerate(traversable):
     #     for putdown_index in putdown_indices:
