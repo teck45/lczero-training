@@ -18,6 +18,7 @@
 
 import numpy as np
 import os
+import random
 import tensorflow as tf
 import time
 import bisect
@@ -67,16 +68,13 @@ class ApplyAttentionPolicyMap(tf.keras.layers.Layer):
 
     def call(self, logits, pp_logits=None):
         logits = tf.reshape(logits, [-1, 64 * 64])
-        pp_logits = tf.reshape(pp_logits, [-1, 8 * 24])  # for promotion keys
-        logits = tf.concat([logits, pp_logits], axis=1)  # for promotion keys
+        pp_logits = tf.reshape(pp_logits, [-1, 8 * 24])
+        logits = tf.concat([logits, pp_logits], axis=1)
         possible_logits = tf.matmul(logits, tf.cast(self.fc1, logits.dtype))
-
+        return possible_logits
         # for static promotion logits:
         # promotion_defaults = tf.broadcast_to(self.promotion_defaults, [tf.shape(logits)[0], 66])
         # return tf.concat([possible_logits, promotion_defaults], axis=1)
-
-        # for promotion keys:
-        return possible_logits
 
 
 class TFProcess:
@@ -1448,18 +1446,6 @@ class TFProcess:
                 # tokens = tf.keras.layers.LayerNormalization(epsilon=1e-6, name='policy/global_ln/' + str(i))\
                 #     ((1/tf.math.log(i+1.718282))*resid + tokens)
 
-            """
-            query performance improvements: 
-            create a mask to zero all token tensors except those representing our pieces
-                - need to set use_bias=False for wq and wk layers
-                - change input of wq from tokens -> q_tokens
-                - after some testing, don't think this method is actually faster
-            """
-            # our_pieces = tf.expand_dims(tf.cast(
-            #     tf.math.reduce_sum(inputs[:, 0:6, :], axis=1),
-            #     tf.bool), axis=2)
-            # q_tokens = tf.where(condition=our_pieces, x=tokens, y=tf.zeros_like(tokens))
-
             # create queries and keys
             queries = tf.keras.layers.Dense(self.d_model_pol_hd,
                                             kernel_initializer='glorot_normal',
@@ -1470,49 +1456,56 @@ class TFProcess:
                                          kernel_regularizer=self.l2reg,
                                          name='policy/attention/wk')(tokens)
 
-            # split heads, does nothing if n_heads_pol_hd is 1
-            assert self.d_model_pol_hd % self.n_heads_pol_hd == 0
-            depth = self.d_model_pol_hd // self.n_heads_pol_hd
-            batch_size = tf.shape(queries)[0]
-            queries = self.split_heads(queries, batch_size, self.n_heads_pol_hd, depth)
-            keys = self.split_heads(keys, batch_size, self.n_heads_pol_hd, depth)
+            # MULTI-HEAD ATTENTION -- currently broken with pawn promotion, didn't appear to help much anyway
+            # # split heads, does nothing if n_heads_pol_hd is 1
+            # assert self.d_model_pol_hd % self.n_heads_pol_hd == 0
+            # depth = self.d_model_pol_hd // self.n_heads_pol_hd
+            # batch_size = tf.shape(queries)[0]
+            # queries = self.split_heads(queries, batch_size, self.n_heads_pol_hd, depth)
+            # keys = self.split_heads(keys, batch_size, self.n_heads_pol_hd, depth)
 
-            # compute policy logits
+            # PAWN PROMOTION (3rd draft)
+            promotion_keys = keys[:, -8:, :]
+            promotion_offsets = tf.keras.layers.Dense(3, kernel_initializer='glorot_normal',
+                                                      kernel_regularizer=self.l2reg, name='policy/ppo')(promotion_keys)
+            promotion_offsets = tf.transpose(promotion_offsets, perm=[0, 2, 1])  # Bx3x8
+
+            # COMPUTE POLICY LOGITS
             matmul_qk = tf.matmul(queries, keys, transpose_b=True)
+
+            # generate pawn promotion logits using the scalar promotion offsets
+            n_promo_logits = matmul_qk[:, -16:-8, -8:]  # traversals from r7 to r8
+            q_promo_logits = tf.expand_dims(n_promo_logits + promotion_offsets[:, 0:1, :], axis=3)  # Bx8x8x1
+            r_promo_logits = tf.expand_dims(n_promo_logits + promotion_offsets[:, 1:2, :], axis=3)
+            b_promo_logits = tf.expand_dims(n_promo_logits + promotion_offsets[:, 2:3, :], axis=3)
+            promotion_logits = tf.concat([q_promo_logits, r_promo_logits, b_promo_logits], axis=3)  # Bx8x8x3
+            promotion_logits = tf.reshape(promotion_logits, [-1, 8, 24])  # logits now alternate a7a8q,a7a8r,a7a8b,...,
+
+            # scale down logits
             dk = tf.cast(tf.shape(keys)[-1], keys.dtype)
-            policy_attn_logits = matmul_qk / tf.math.sqrt(dk)  # BATCH_SIZEx64x64 (64 queries, 64 keys)
+            policy_attn_logits = matmul_qk / tf.math.sqrt(dk)  # Bx64x64 (64 queries, 64 keys)
+            promotion_logits = promotion_logits / tf.math.sqrt(dk)  # Bx8x24 (8 queries, 3x8 promotions)
 
-            # PAWN PROMOTION (2nd draft concept)
-            r7_queries = queries[:, -16:-8, :]
-            r8_keys = keys[:, -8:, :]
-            r8q = tf.keras.layers.Dense(self.d_model_pol_hd, kernel_initializer='glorot_normal',
-                                        kernel_regularizer=self.l2reg, name='policy/ppq')(r8_keys)
-            r8r = tf.keras.layers.Dense(self.d_model_pol_hd, kernel_initializer='glorot_normal',
-                                        kernel_regularizer=self.l2reg, name='policy/ppr')(r8_keys)
-            r8b = tf.keras.layers.Dense(self.d_model_pol_hd, kernel_initializer='glorot_normal',
-                                        kernel_regularizer=self.l2reg, name='policy/ppb')(r8_keys)
-            promotion_keys = tf.concat([r8q, r8r, r8b], axis=1)
-            matmul_pp = tf.matmul(r7_queries, promotion_keys, transpose_b=True)
-            promotion_logits = matmul_pp / tf.math.sqrt(dk)  # BATCH_SIZEx8x24 (8 queries, 24 keys)
+            # MULTI-HEAD ATTENTION -- currently broken with new pawn promotion, didn't appear to help much anyway
+            # # summarize policy from all heads if multiple, using one of several methods
+            # if self.n_heads_pol_hd > 1:
+            #     # attn_wts.append(promotion_logits)
+            #     attn_wts.append(policy_attn_logits)
+            #     """
+            #     ARITHMETIC MEAN ACROSS ALL HEADS
+            #     small performance benefit, if any. small hit to speed, increasing with number of heads
+            #     more heads may work for larger nets, trained for longer, and with larger d_model sizes
+            #     """
+            #     policy_attn_logits = tf.math.reduce_mean(policy_attn_logits, axis=1)
+            #     promotion_logits = tf.math.reduce_mean(promotion_logits, axis=1)
+            #     """SUM ACROSS ALL HEADS (slightly faster, but worse)"""
+            #     # policy_attn_logits = tf.reduce_sum(policy_attn_logits, axis=1)
+            #     # promotion_logits = tf.math.reduce_sum(promotion_logits, axis=1)
 
-            # summarize policy from all heads if multiple, using one of several methods
-            if self.n_heads_pol_hd > 1:
-                attn_wts.append(promotion_logits)
-                attn_wts.append(policy_attn_logits)
-                """
-                ARITHMETIC MEAN ACROSS ALL HEADS
-                small performance benefit, if any. small hit to speed, increasing with number of heads
-                more heads may work for larger nets, trained for longer, and with larger d_model sizes
-                """
-                policy_attn_logits = tf.math.reduce_mean(policy_attn_logits, axis=1)
-                promotion_logits = tf.math.reduce_mean(promotion_logits, axis=1)  # for promotion keys
-                """SUM ACROSS ALL HEADS (slightly faster, but worse)"""
-                # policy_attn_logits = tf.reduce_sum(policy_attn_logits, axis=1)
-                # promotion_logits = tf.math.reduce_sum(promotion_logits, axis=1)  # for promotion keys
             attn_wts.append(promotion_logits)
             attn_wts.append(policy_attn_logits)
 
-            # apply the new policy map so output becomes BATCH_SIZEx1856
+            # APPLY POLICY MAP -- output becomes Bx1856
             h_fc1 = ApplyAttentionPolicyMap(dtype=policy_attn_logits.dtype)(policy_attn_logits, promotion_logits)
 
         else:

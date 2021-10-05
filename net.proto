@@ -108,12 +108,8 @@ message Weights {
   optional Layer ip2_pol_b = 18;
   optional Layer ip3_pol_w = 19;  // "wk" in policy attention
   optional Layer ip3_pol_b = 20;
-  optional Layer ip4_pol_w = 22;  // "ppq" in policy attention
+  optional Layer ip4_pol_w = 22;  // "ppo" in policy attention
   optional Layer ip4_pol_b = 23;
-  optional Layer ip5_pol_w = 24;  // "ppr" in policy attention
-  optional Layer ip5_pol_b = 25;
-  optional Layer ip6_pol_w = 26;  // "ppb" in policy attention
-  optional Layer ip6_pol_b = 27;
   // Policy encoder stack
   repeated EncoderLayer encoder_pol = 21;
 
