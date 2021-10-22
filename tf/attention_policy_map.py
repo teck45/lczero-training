@@ -82,7 +82,7 @@ def make_map():
                 z[putdown_index + (64*pickup_index), i] = 1
                 i += 1
 
-    # for promotion policy (3rd draft) -- 2nd loop for promotions (for i in 1792:1858, stride by ls[j)
+    # for promotion policy (3rd draft) -- 2nd loop for promotions (for i in 1792:1858, stride by ls[j])
     j = 0
     j1 = np.array([3, -2, 3, -2, 3])
     j2 = np.array([3, 3, -5, 3, 3, -5, 3, 3, 1])
