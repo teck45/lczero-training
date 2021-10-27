@@ -496,6 +496,8 @@ def main(cmd):
 
     tfprocess.restore_v2()
 
+    # comment this code to reload a training checkpoint and save it as a tf model without resuming training
+    ############################################################
     # If number of test positions is not given
     # sweeps through all test chunks statistically
     # Assumes average of 10 samples per test game.
@@ -515,6 +517,20 @@ def main(cmd):
             tfprocess.save_swa_weights_v2(cmd.output)
         else:
             tfprocess.save_leelaz_weights_v2(cmd.output)
+    ############################################################
+
+    # save the last training checkpoint in Tensorflow saved model format
+    ############################################################
+    print(tfprocess.manager.checkpoints)
+    tfprocess.checkpoint.restore(tfprocess.manager.checkpoints[-1])
+    backup = tfprocess.read_weights()
+    for (swa, w) in zip(tfprocess.swa_weights, tfprocess.model.weights):
+        w.assign(swa.read_value())
+    # specify the save path and name of the model
+    tfprocess.model.save("/path/to/tf_models/model")
+    for (old, w) in zip(backup, tfprocess.model.weights):
+        w.assign(old)
+    ############################################################
 
     train_parser.shutdown()
     test_parser.shutdown()
