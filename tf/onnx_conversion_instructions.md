@@ -6,6 +6,7 @@ in train.py:
 3. save the network in TensorFlow 'saved model' format using model.save(path)
 
 in fix_tf_model.py:
+
 4. load the tf model configuration using model.get_config()
 5. directly modify the model config to resolve net arch inconsistencies between lc0 backend and training code, specifically:
     * change input layer shape to [112x8x8] from [112x64]
@@ -16,7 +17,9 @@ in fix_tf_model.py:
 7. transfer over the layer weights to the new model and save it
 
 from the command line:
+
 8. convert the saved model to onnx using tf2onnx (https://github.com/onnx/tensorflow-onnx/releases)
 
 in save_onnx_proto.py:
+
 9. load the onnx model, resolve the naming of input and output layers, and save the weights as a proto file
