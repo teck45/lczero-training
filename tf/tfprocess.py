@@ -127,6 +127,8 @@ class TFProcess:
             self.POLICY_HEAD = pb.NetworkFormat.POLICY_CONVOLUTION
         elif policy_head == "attention":
             self.POLICY_HEAD = pb.NetworkFormat.POLICY_ATTENTION
+        elif policy_head == "hydra":
+            self.POLICY_HEAD = pb.NetworkFormat.POLICY_HYDRA
         else:
             raise ValueError(
                 "Unknown policy head format: {}".format(policy_head))
@@ -240,16 +242,16 @@ class TFProcess:
         input_var = tf.keras.Input(shape=(112, 8 * 8))
         x_planes = tf.keras.layers.Reshape([112, 8, 8])(input_var)
         # attention weights added as additional output for visualization script -- not necessary for engine to perform
-        if self.POLICY_HEAD == pb.NetworkFormat.POLICY_ATTENTION:
+        if self.POLICY_HEAD == pb.NetworkFormat.POLICY_ATTENTION or pb.NetworkFormat.POLICY_HYDRA:
             policy, value, moves_left, attn_wts = self.construct_net_v2(x_planes)
         else:
             policy, value, moves_left = self.construct_net_v2(x_planes)
         if self.moves_left:
-            if self.POLICY_HEAD == pb.NetworkFormat.POLICY_ATTENTION:
+            if self.POLICY_HEAD == pb.NetworkFormat.POLICY_ATTENTION or pb.NetworkFormat.POLICY_HYDRA:
                 outputs = [policy, value, moves_left, attn_wts]
             else:
                 outputs = [policy, value, moves_left]
-        elif self.POLICY_HEAD == pb.NetworkFormat.POLICY_ATTENTION:
+        elif self.POLICY_HEAD == pb.NetworkFormat.POLICY_ATTENTION or pb.NetworkFormat.POLICY_HYDRA:
             outputs = [policy, value, attn_wts]
         else:
             outputs = [policy, value]
@@ -300,8 +302,6 @@ class TFProcess:
                 tf.cast(
                     tf.equal(tf.argmax(input=target, axis=1),
                              tf.argmax(input=output, axis=1)), tf.float32))
-
-        self.policy_accuracy_fn = policy_accuracy
 
         self.policy_accuracy_fn = policy_accuracy
 
@@ -401,8 +401,10 @@ class TFProcess:
         else:
             moves_loss_w = tf.constant(0.0, dtype=tf.float32)
 
-        def _lossMix(policy, value, moves_left):
-            return pol_loss_w * policy + val_loss_w * value + moves_loss_w * moves_left
+        def _lossMix(policy: list, value, moves_left):
+            if self.POLICY_HEAD == pb.NetworkFormat.POLICY_HYDRA:
+                return pol_loss_w * policy[0] + pol_loss_w * policy[1] + val_loss_w * value + moves_loss_w * moves_left
+            return pol_loss_w * policy[0] + val_loss_w * value + moves_loss_w * moves_left
 
         self.lossMix = _lossMix
 
@@ -415,7 +417,11 @@ class TFProcess:
 
         self.accuracy_fn = accuracy
 
-        self.avg_policy_loss = []
+        if self.POLICY_HEAD == pb.NetworkFormat.POLICY_HYDRA:
+            self.avg_policy_loss_a = []
+            self.avg_policy_loss_b = []
+        else:
+            self.avg_policy_loss = []
         self.avg_value_loss = []
         self.avg_moves_left_loss = []
         self.avg_mse_loss = []
@@ -570,7 +576,8 @@ class TFProcess:
 
         total_steps = self.cfg['training']['total_steps']
         for i in range(steps % total_steps, total_steps):
-            print("step {}".format(i))
+            if i % 100 == 0:
+                print("step {}".format(i))
             self.process_v2(batch_size,
                             test_batches,
                             batch_splits=batch_splits)
@@ -585,7 +592,13 @@ class TFProcess:
             outputs = self.model(x, training=True)
             policy = outputs[0]
             value = outputs[1]
-            policy_loss = self.policy_loss_fn(y, policy)
+            if self.POLICY_HEAD == pb.NetworkFormat.POLICY_HYDRA:
+                policy_a = policy[0]
+                policy_b = policy[1]
+                policy_loss_a = self.policy_loss_fn(y, policy_a)
+                policy_loss_b = self.policy_loss_fn(y, policy_b)
+            else:
+                policy_loss = self.policy_loss_fn(y, policy)
             reg_term = sum(self.model.losses)
             if self.wdl:
                 value_ce_loss = self.value_loss_fn(self.qMix(z, q), value)
@@ -598,24 +611,44 @@ class TFProcess:
                 moves_left_loss = self.moves_left_loss_fn(m, moves_left)
             else:
                 moves_left_loss = tf.constant(0.)
-            total_loss = self.lossMix(policy_loss, value_loss,
-                                      moves_left_loss) + reg_term
+            if self.POLICY_HEAD == pb.NetworkFormat.POLICY_HYDRA:
+                total_loss = self.lossMix([policy_loss_a, policy_loss_b], value_loss,
+                                          moves_left_loss) + reg_term
+            else:
+                total_loss = self.lossMix([policy_loss], value_loss,
+                                          moves_left_loss) + reg_term
             if self.loss_scale != 1:
                 total_loss = self.optimizer.get_scaled_loss(total_loss)
         if self.wdl:
             mse_loss = self.mse_loss_fn(self.qMix(z, q), value)
         else:
             value_loss = self.value_loss_fn(self.qMix(z, q), value)
+        if self.POLICY_HEAD == pb.NetworkFormat.POLICY_HYDRA:
+            return policy_loss_a, policy_loss_b, value_loss, mse_loss, moves_left_loss, reg_term, tape.gradient(
+                total_loss, self.model.trainable_weights)
         return policy_loss, value_loss, mse_loss, moves_left_loss, reg_term, tape.gradient(
             total_loss, self.model.trainable_weights)
 
     @tf.function()
     def strategy_process_inner_loop(self, x, y, z, q, m):
-        policy_loss, value_loss, mse_loss, moves_left_loss, reg_term, new_grads = self.strategy.run(
-            self.process_inner_loop, args=(x, y, z, q, m))
-        policy_loss = self.strategy.reduce(tf.distribute.ReduceOp.MEAN,
-                                           policy_loss,
-                                           axis=None)
+        if self.POLICY_HEAD == pb.NetworkFormat.POLICY_HYDRA:
+            policy_loss_a, policy_loss_b, value_loss, mse_loss, moves_left_loss, reg_term, new_grads = self.strategy.run(
+                self.process_inner_loop, args=(x, y, z, q, m))
+
+            policy_loss_a = self.strategy.reduce(tf.distribute.ReduceOp.MEAN,
+                                                 policy_loss_a,
+                                                 axis=None)
+            policy_loss_b = self.strategy.reduce(tf.distribute.ReduceOp.MEAN,
+                                                 policy_loss_b,
+                                                 axis=None)
+        else:
+            policy_loss, value_loss, mse_loss, moves_left_loss, reg_term, new_grads = self.strategy.run(
+                self.process_inner_loop, args=(x, y, z, q, m))
+
+            policy_loss = self.strategy.reduce(tf.distribute.ReduceOp.MEAN,
+                                               policy_loss,
+                                               axis=None)
+
         value_loss = self.strategy.reduce(tf.distribute.ReduceOp.MEAN,
                                           value_loss,
                                           axis=None)
@@ -628,6 +661,8 @@ class TFProcess:
         reg_term = self.strategy.reduce(tf.distribute.ReduceOp.MEAN,
                                         reg_term,
                                         axis=None)
+        if self.POLICY_HEAD == pb.NetworkFormat.POLICY_HYDRA:
+            return policy_loss_a, policy_loss_b, value_loss, mse_loss, moves_left_loss, reg_term, new_grads
         return policy_loss, value_loss, mse_loss, moves_left_loss, reg_term, new_grads
 
     def apply_grads(self, grads, effective_batch_splits):
@@ -665,8 +700,8 @@ class TFProcess:
     def train_step(self, steps, batch_size, batch_splits):
         # need to add 1 to steps because steps will be incremented after gradient update
         if (steps +
-                1) % self.cfg['training']['train_avg_report_steps'] == 0 or (
-                    steps + 1) % self.cfg['training']['total_steps'] == 0:
+            1) % self.cfg['training']['train_avg_report_steps'] == 0 or (
+                steps + 1) % self.cfg['training']['total_steps'] == 0:
             before_weights = self.read_weights()
 
         # Run training for this batch
@@ -674,11 +709,19 @@ class TFProcess:
         for _ in range(batch_splits):
             x, y, z, q, m = next(self.train_iter)
             if self.strategy is not None:
-                policy_loss, value_loss, mse_loss, moves_left_loss, reg_term, new_grads = self.strategy_process_inner_loop(
-                    x, y, z, q, m)
+                if self.POLICY_HEAD == pb.NetworkFormat.POLICY_HYDRA:
+                    policy_loss_a, policy_loss_b, value_loss, mse_loss, moves_left_loss, reg_term, new_grads = self.strategy_process_inner_loop(
+                        x, y, z, q, m)
+                else:
+                    policy_loss, value_loss, mse_loss, moves_left_loss, reg_term, new_grads = self.strategy_process_inner_loop(
+                        x, y, z, q, m)
             else:
-                policy_loss, value_loss, mse_loss, moves_left_loss, reg_term, new_grads = self.process_inner_loop(
-                    x, y, z, q, m)
+                if self.POLICY_HEAD == pb.NetworkFormat.POLICY_HYDRA:
+                    policy_loss_a, policy_loss_b, value_loss, mse_loss, moves_left_loss, reg_term, new_grads = self.process_inner_loop(
+                        x, y, z, q, m)
+                else:
+                    policy_loss, value_loss, mse_loss, moves_left_loss, reg_term, new_grads = self.process_inner_loop(
+                        x, y, z, q, m)
             if not grads:
                 grads = new_grads
             else:
@@ -690,7 +733,11 @@ class TFProcess:
             # Google's paper scales MSE by 1/4 to a [0, 1] range, so do the same to
             # get comparable values.
             mse_loss /= 4.0
-            self.avg_policy_loss.append(policy_loss)
+            if self.POLICY_HEAD == pb.NetworkFormat.POLICY_HYDRA:
+                self.avg_policy_loss_a.append(policy_loss_a)
+                self.avg_policy_loss_b.append(policy_loss_b)
+            else:
+                self.avg_policy_loss.append(policy_loss)
             if self.wdl:
                 self.avg_value_loss.append(value_loss)
             if self.moves_left:
@@ -717,8 +764,8 @@ class TFProcess:
         steps = self.global_step.read_value()
 
         if steps % self.cfg['training'][
-                'train_avg_report_steps'] == 0 or steps % self.cfg['training'][
-                    'total_steps'] == 0:
+            'train_avg_report_steps'] == 0 or steps % self.cfg['training'][
+            'total_steps'] == 0:
             pol_loss_w = self.cfg['training']['policy_loss_weight']
             val_loss_w = self.cfg['training']['value_loss_weight']
             moves_loss_w = self.cfg['training']['moves_left_loss_weight']
@@ -729,23 +776,42 @@ class TFProcess:
                 steps_elapsed = steps - self.last_steps
                 speed = batch_size * (tf.cast(steps_elapsed, tf.float32) /
                                       elapsed)
-            avg_policy_loss = np.mean(self.avg_policy_loss or [0])
+            if self.POLICY_HEAD == pb.NetworkFormat.POLICY_HYDRA:
+                avg_policy_loss_a = np.mean(self.avg_policy_loss_a or [0])
+                avg_policy_loss_b = np.mean(self.avg_policy_loss_b or [0])
+            else:
+                avg_policy_loss = np.mean(self.avg_policy_loss or [0])
             avg_moves_left_loss = np.mean(self.avg_moves_left_loss or [0])
             avg_value_loss = np.mean(self.avg_value_loss or [0])
             avg_mse_loss = np.mean(self.avg_mse_loss or [0])
             avg_reg_term = np.mean(self.avg_reg_term or [0])
-            print(
-                "step {}, lr={:g} policy={:g} value={:g} mse={:g} moves={:g} reg={:g} total={:g} ({:g} pos/s)"
-                .format(
-                    steps, self.lr, avg_policy_loss, avg_value_loss,
-                    avg_mse_loss, avg_moves_left_loss, avg_reg_term,
-                    pol_loss_w * avg_policy_loss +
-                    val_loss_w * avg_value_loss + avg_reg_term +
-                    moves_loss_w * avg_moves_left_loss, speed))
+            if self.POLICY_HEAD == pb.NetworkFormat.POLICY_HYDRA:
+                print(
+                    "step {}, lr={:g} policy_a={:g} policy_b={:g} value={:g} mse={:g} moves={:g} reg={:g} total={:g} ({:g} pos/s)"
+                        .format(
+                        steps, self.lr, avg_policy_loss_a, avg_policy_loss_b, avg_value_loss,
+                        avg_mse_loss, avg_moves_left_loss, avg_reg_term,
+                        pol_loss_w * avg_policy_loss_a +
+                        pol_loss_w * avg_policy_loss_b +
+                        val_loss_w * avg_value_loss + avg_reg_term +
+                        moves_loss_w * avg_moves_left_loss, speed))
+            else:
+                print(
+                    "step {}, lr={:g} policy={:g} value={:g} mse={:g} moves={:g} reg={:g} total={:g} ({:g} pos/s)"
+                        .format(
+                        steps, self.lr, avg_policy_loss, avg_value_loss,
+                        avg_mse_loss, avg_moves_left_loss, avg_reg_term,
+                        pol_loss_w * avg_policy_loss +
+                        val_loss_w * avg_value_loss + avg_reg_term +
+                        moves_loss_w * avg_moves_left_loss, speed))
 
             after_weights = self.read_weights()
             with self.train_writer.as_default():
-                tf.summary.scalar("Policy Loss", avg_policy_loss, step=steps)
+                if self.POLICY_HEAD == pb.NetworkFormat.POLICY_HYDRA:
+                    tf.summary.scalar("Policy Loss A", avg_policy_loss_a, step=steps)
+                    tf.summary.scalar("Policy Loss B", avg_policy_loss_b, step=steps)
+                else:
+                    tf.summary.scalar("Policy Loss", avg_policy_loss, step=steps)
                 tf.summary.scalar("Value Loss", avg_value_loss, step=steps)
                 if self.moves_left:
                     tf.summary.scalar("Moves Left Loss",
@@ -762,7 +828,11 @@ class TFProcess:
             self.train_writer.flush()
             self.time_start = time_end
             self.last_steps = steps
-            self.avg_policy_loss = []
+            if self.POLICY_HEAD == pb.NetworkFormat.POLICY_HYDRA:
+                self.avg_policy_loss_a = []
+                self.avg_policy_loss_b = []
+            else:
+                self.avg_policy_loss = []
             self.avg_moves_left_loss = []
             self.avg_value_loss = []
             self.avg_mse_loss = []
@@ -776,7 +846,7 @@ class TFProcess:
         # By default disabled since 0 != 10.
         if steps % self.cfg['training'].get('profile_step_freq',
                                             1) == self.cfg['training'].get(
-                                                'profile_step_offset', 10):
+            'profile_step_offset', 10):
             self.profiling_start_step = steps
             tf.profiler.experimental.start(
                 os.path.join(os.getcwd(),
@@ -809,7 +879,7 @@ class TFProcess:
         # Calculate test values every 'test_steps', but also ensure there is
         # one at the final step so the delta to the first step can be calculated.
         if steps % self.cfg['training']['test_steps'] == 0 or steps % self.cfg[
-                'training']['total_steps'] == 0:
+            'training']['total_steps'] == 0:
             with tf.profiler.experimental.Trace("Test", step_num=steps):
                 self.calculate_test_summaries_v2(test_batches, steps)
                 if self.swa_enabled:
@@ -863,10 +933,22 @@ class TFProcess:
         outputs = self.model(x, training=False)
         policy = outputs[0]
         value = outputs[1]
-        policy_loss = self.policy_loss_fn(y, policy)
-        policy_accuracy = self.policy_accuracy_fn(y, policy)
-        policy_entropy = self.policy_entropy_fn(y, policy)
-        policy_ul = self.policy_uniform_loss_fn(y, policy)
+        if self.POLICY_HEAD == pb.NetworkFormat.POLICY_HYDRA:
+            policy_a = policy[0]
+            policy_b = policy[1]
+            policy_loss_a = self.policy_loss_fn(y, policy_a)
+            policy_loss_b = self.policy_loss_fn(y, policy_b)
+            policy_accuracy_a = self.policy_accuracy_fn(y, policy_a)
+            policy_accuracy_b = self.policy_accuracy_fn(y, policy_b)
+            policy_entropy_a = self.policy_entropy_fn(y, policy_a)
+            policy_entropy_b = self.policy_entropy_fn(y, policy_b)
+            policy_ul_a = self.policy_uniform_loss_fn(y, policy_a)
+            policy_ul_b = self.policy_uniform_loss_fn(y, policy_b)
+        else:
+            policy_loss = self.policy_loss_fn(y, policy)
+            policy_accuracy = self.policy_accuracy_fn(y, policy)
+            policy_entropy = self.policy_entropy_fn(y, policy)
+            policy_ul = self.policy_uniform_loss_fn(y, policy)
         if self.wdl:
             value_loss = self.value_loss_fn(self.qMix(z, q), value)
             mse_loss = self.mse_loss_fn(self.qMix(z, q), value)
@@ -882,24 +964,60 @@ class TFProcess:
         else:
             moves_left_loss = tf.constant(0.)
             moves_left_mean_error = tf.constant(0.)
+        if self.POLICY_HEAD == pb.NetworkFormat.POLICY_HYDRA:
+            return policy_loss_a, policy_loss_b, value_loss, moves_left_loss, mse_loss, policy_accuracy_a, policy_accuracy_b, value_accuracy, moves_left_mean_error, policy_entropy_a, policy_entropy_b, policy_ul_a, policy_ul_b
         return policy_loss, value_loss, moves_left_loss, mse_loss, policy_accuracy, value_accuracy, moves_left_mean_error, policy_entropy, policy_ul
 
     @tf.function()
     def strategy_calculate_test_summaries_inner_loop(self, x, y, z, q, m):
-        policy_loss, value_loss, moves_left_loss, mse_loss, policy_accuracy, value_accuracy, moves_left_mean_error, policy_entropy, policy_ul = self.strategy.run(
-            self.calculate_test_summaries_inner_loop, args=(x, y, z, q, m))
-        policy_loss = self.strategy.reduce(tf.distribute.ReduceOp.MEAN,
-                                           policy_loss,
-                                           axis=None)
+        if self.POLICY_HEAD == pb.NetworkFormat.POLICY_HYDRA:
+            policy_loss_a, policy_loss_b, value_loss, moves_left_loss, mse_loss, policy_accuracy_a, policy_accuracy_b, value_accuracy, moves_left_mean_error, policy_entropy_a, policy_entropy_b, policy_ul_a, policy_ul_b = self.strategy.run(
+                self.calculate_test_summaries_inner_loop, args=(x, y, z, q, m))
+            policy_loss_a = self.strategy.reduce(tf.distribute.ReduceOp.MEAN,
+                                                 policy_loss_a,
+                                                 axis=None)
+            policy_loss_b = self.strategy.reduce(tf.distribute.ReduceOp.MEAN,
+                                                 policy_loss_b,
+                                                 axis=None)
+            policy_accuracy_a = self.strategy.reduce(tf.distribute.ReduceOp.MEAN,
+                                                     policy_accuracy_a,
+                                                     axis=None)
+            policy_accuracy_b = self.strategy.reduce(tf.distribute.ReduceOp.MEAN,
+                                                     policy_accuracy_b,
+                                                     axis=None)
+            policy_entropy_a = self.strategy.reduce(tf.distribute.ReduceOp.MEAN,
+                                                    policy_entropy_a,
+                                                    axis=None)
+            policy_entropy_b = self.strategy.reduce(tf.distribute.ReduceOp.MEAN,
+                                                    policy_entropy_b,
+                                                    axis=None)
+            policy_ul_a = self.strategy.reduce(tf.distribute.ReduceOp.MEAN,
+                                               policy_ul_a,
+                                               axis=None)
+            policy_ul_b = self.strategy.reduce(tf.distribute.ReduceOp.MEAN,
+                                               policy_ul_b,
+                                               axis=None)
+        else:
+            policy_loss, value_loss, moves_left_loss, mse_loss, policy_accuracy, value_accuracy, moves_left_mean_error, policy_entropy, policy_ul = self.strategy.run(
+                self.calculate_test_summaries_inner_loop, args=(x, y, z, q, m))
+            policy_loss = self.strategy.reduce(tf.distribute.ReduceOp.MEAN,
+                                               policy_loss,
+                                               axis=None)
+            policy_accuracy = self.strategy.reduce(tf.distribute.ReduceOp.MEAN,
+                                                   policy_accuracy,
+                                                   axis=None)
+            policy_entropy = self.strategy.reduce(tf.distribute.ReduceOp.MEAN,
+                                                  policy_entropy,
+                                                  axis=None)
+            policy_ul = self.strategy.reduce(tf.distribute.ReduceOp.MEAN,
+                                             policy_ul,
+                                             axis=None)
         value_loss = self.strategy.reduce(tf.distribute.ReduceOp.MEAN,
                                           value_loss,
                                           axis=None)
         mse_loss = self.strategy.reduce(tf.distribute.ReduceOp.MEAN,
                                         mse_loss,
                                         axis=None)
-        policy_accuracy = self.strategy.reduce(tf.distribute.ReduceOp.MEAN,
-                                               policy_accuracy,
-                                               axis=None)
         value_accuracy = self.strategy.reduce(tf.distribute.ReduceOp.MEAN,
                                               value_accuracy,
                                               axis=None)
@@ -908,48 +1026,85 @@ class TFProcess:
                                                axis=None)
         moves_left_mean_error = self.strategy.reduce(
             tf.distribute.ReduceOp.MEAN, moves_left_mean_error, axis=None)
-        policy_entropy = self.strategy.reduce(tf.distribute.ReduceOp.MEAN,
-                                              policy_entropy,
-                                              axis=None)
-        policy_ul = self.strategy.reduce(tf.distribute.ReduceOp.MEAN,
-                                         policy_ul,
-                                         axis=None)
+
+        if self.POLICY_HEAD == pb.NetworkFormat.POLICY_HYDRA:
+            return policy_loss_a, policy_loss_b, value_loss, moves_left_loss, mse_loss, policy_accuracy_a, policy_accuracy_b, value_accuracy, moves_left_mean_error, policy_entropy_a, policy_entropy_b, policy_ul_a, policy_ul_b
         return policy_loss, value_loss, moves_left_loss, mse_loss, policy_accuracy, value_accuracy, moves_left_mean_error, policy_entropy, policy_ul
 
     def calculate_test_summaries_v2(self, test_batches, steps):
-        sum_policy_accuracy = 0
+        if self.POLICY_HEAD == pb.NetworkFormat.POLICY_HYDRA:
+            sum_policy_accuracy_a = 0
+            sum_policy_accuracy_b = 0
+            sum_policy_a = 0
+            sum_policy_b = 0
+            sum_policy_entropy_a = 0
+            sum_policy_entropy_b = 0
+            sum_policy_ul_a = 0
+            sum_policy_ul_b = 0
+        else:
+            sum_policy_accuracy = 0
+            sum_policy = 0
+            sum_policy_entropy = 0
+            sum_policy_ul = 0
         sum_value_accuracy = 0
         sum_moves_left = 0
         sum_moves_left_mean_error = 0
         sum_mse = 0
-        sum_policy = 0
         sum_value = 0
-        sum_policy_entropy = 0
-        sum_policy_ul = 0
         for _ in range(0, test_batches):
             x, y, z, q, m = next(self.test_iter)
             if self.strategy is not None:
-                policy_loss, value_loss, moves_left_loss, mse_loss, policy_accuracy, value_accuracy, moves_left_mean_error, policy_entropy, policy_ul = self.strategy_calculate_test_summaries_inner_loop(
-                    x, y, z, q, m)
+                if self.POLICY_HEAD == pb.NetworkFormat.POLICY_HYDRA:
+                    policy_loss_a, policy_loss_b, value_loss, moves_left_loss, mse_loss, policy_accuracy_a, policy_accuracy_b, value_accuracy, moves_left_mean_error, policy_entropy_a, policy_entropy_b, policy_ul_a, policy_ul_b = self.strategy_calculate_test_summaries_inner_loop(
+                        x, y, z, q, m)
+                else:
+                    policy_loss, value_loss, moves_left_loss, mse_loss, policy_accuracy, value_accuracy, moves_left_mean_error, policy_entropy, policy_ul = self.strategy_calculate_test_summaries_inner_loop(
+                        x, y, z, q, m)
             else:
-                policy_loss, value_loss, moves_left_loss, mse_loss, policy_accuracy, value_accuracy, moves_left_mean_error, policy_entropy, policy_ul = self.calculate_test_summaries_inner_loop(
-                    x, y, z, q, m)
-            sum_policy_accuracy += policy_accuracy
-            sum_policy_entropy += policy_entropy
-            sum_policy_ul += policy_ul
+                if self.POLICY_HEAD == pb.NetworkFormat.POLICY_HYDRA:
+                    policy_loss_a, policy_loss_b, value_loss, moves_left_loss, mse_loss, policy_accuracy_a, policy_accuracy_b, value_accuracy, moves_left_mean_error, policy_entropy_a, policy_entropy_b, policy_ul_a, policy_ul_b = self.calculate_test_summaries_inner_loop(
+                        x, y, z, q, m)
+                else:
+                    policy_loss, value_loss, moves_left_loss, mse_loss, policy_accuracy, value_accuracy, moves_left_mean_error, policy_entropy, policy_ul = self.calculate_test_summaries_inner_loop(
+                        x, y, z, q, m)
+            if self.POLICY_HEAD == pb.NetworkFormat.POLICY_HYDRA:
+                sum_policy_accuracy_a += policy_accuracy_a
+                sum_policy_accuracy_b += policy_accuracy_b
+                sum_policy_entropy_a += policy_entropy_a
+                sum_policy_entropy_b += policy_entropy_b
+                sum_policy_ul_a += policy_ul_a
+                sum_policy_ul_b += policy_ul_b
+                sum_policy_a += policy_loss_a
+                sum_policy_b += policy_loss_b
+            else:
+                sum_policy_accuracy += policy_accuracy
+                sum_policy_entropy += policy_entropy
+                sum_policy_ul += policy_ul
+                sum_policy += policy_loss
             sum_mse += mse_loss
-            sum_policy += policy_loss
             if self.wdl:
                 sum_value_accuracy += value_accuracy
                 sum_value += value_loss
             if self.moves_left:
                 sum_moves_left += moves_left_loss
                 sum_moves_left_mean_error += moves_left_mean_error
-        sum_policy_accuracy /= test_batches
-        sum_policy_accuracy *= 100
-        sum_policy /= test_batches
-        sum_policy_entropy /= test_batches
-        sum_policy_ul /= test_batches
+        if self.POLICY_HEAD == pb.NetworkFormat.POLICY_HYDRA:
+            sum_policy_accuracy_a /= test_batches
+            sum_policy_accuracy_b /= test_batches
+            sum_policy_accuracy_a *= 100
+            sum_policy_accuracy_b *= 100
+            sum_policy_a /= test_batches
+            sum_policy_b /= test_batches
+            sum_policy_entropy_a /= test_batches
+            sum_policy_entropy_b /= test_batches
+            sum_policy_ul_a /= test_batches
+            sum_policy_ul_b /= test_batches
+        else:
+            sum_policy_accuracy /= test_batches
+            sum_policy_accuracy *= 100
+            sum_policy /= test_batches
+            sum_policy_entropy /= test_batches
+            sum_policy_ul /= test_batches
         sum_value /= test_batches
         if self.wdl:
             sum_value_accuracy /= test_batches
@@ -961,18 +1116,38 @@ class TFProcess:
             sum_moves_left_mean_error /= test_batches
         self.net.pb.training_params.learning_rate = self.lr
         self.net.pb.training_params.mse_loss = sum_mse
-        self.net.pb.training_params.policy_loss = sum_policy
         # TODO store value and value accuracy in pb
-        self.net.pb.training_params.accuracy = sum_policy_accuracy
+        if self.POLICY_HEAD == pb.NetworkFormat.POLICY_HYDRA:
+            self.net.pb.training_params.policy_loss_a = sum_policy_a
+            self.net.pb.training_params.policy_loss_b = sum_policy_b
+            self.net.pb.training_params.accuracy_a = sum_policy_accuracy_a
+            self.net.pb.training_params.accuracy_b = sum_policy_accuracy_b
+        else:
+            self.net.pb.training_params.policy_loss = sum_policy
+            self.net.pb.training_params.accuracy = sum_policy_accuracy
         with self.test_writer.as_default():
-            tf.summary.scalar("Policy Loss", sum_policy, step=steps)
+            if self.POLICY_HEAD == pb.NetworkFormat.POLICY_HYDRA:
+                tf.summary.scalar("Policy Loss A", sum_policy_a, step=steps)
+                tf.summary.scalar("Policy Loss B", sum_policy_b, step=steps)
+                tf.summary.scalar("Policy Accuracy A",
+                                  sum_policy_accuracy_a,
+                                  step=steps)
+                tf.summary.scalar("Policy Accuracy B",
+                                  sum_policy_accuracy_b,
+                                  step=steps)
+                tf.summary.scalar("Policy Entropy A", sum_policy_entropy_a, step=steps)
+                tf.summary.scalar("Policy Entropy B", sum_policy_entropy_b, step=steps)
+                tf.summary.scalar("Policy UL A", sum_policy_ul_a, step=steps)
+                tf.summary.scalar("Policy UL B", sum_policy_ul_b, step=steps)
+            else:
+                tf.summary.scalar("Policy Loss", sum_policy, step=steps)
+                tf.summary.scalar("Policy Accuracy",
+                                  sum_policy_accuracy,
+                                  step=steps)
+                tf.summary.scalar("Policy Entropy", sum_policy_entropy, step=steps)
+                tf.summary.scalar("Policy UL", sum_policy_ul, step=steps)
             tf.summary.scalar("Value Loss", sum_value, step=steps)
             tf.summary.scalar("MSE Loss", sum_mse, step=steps)
-            tf.summary.scalar("Policy Accuracy",
-                              sum_policy_accuracy,
-                              step=steps)
-            tf.summary.scalar("Policy Entropy", sum_policy_entropy, step=steps)
-            tf.summary.scalar("Policy UL", sum_policy_ul, step=steps)
             if self.wdl:
                 tf.summary.scalar("Value Accuracy",
                                   sum_value_accuracy,
@@ -988,8 +1163,17 @@ class TFProcess:
                 tf.summary.histogram(w.name, w, step=steps)
         self.test_writer.flush()
 
-        print("step {}, policy={:g} value={:g} policy accuracy={:g}% value accuracy={:g}% mse={:g} policy entropy={:g} policy ul={:g}".\
-            format(steps, sum_policy, sum_value, sum_policy_accuracy, sum_value_accuracy, sum_mse, sum_policy_entropy, sum_policy_ul), end = '')
+        if self.POLICY_HEAD == pb.NetworkFormat.POLICY_HYDRA:
+            print(
+                "step {}, policy a={:g} policy b={:g} value={:g} policy accuracy a={:g}% policy accuracy b={:g}% value accuracy={:g}% mse={:g} policy entropy a={:g} policy entropy b={:g} policy ul a={:g} policy ul b={:g}". \
+                    format(steps, sum_policy_a, sum_policy_b, sum_value, sum_policy_accuracy_a, sum_policy_accuracy_b,
+                           sum_value_accuracy, sum_mse, sum_policy_entropy_a, sum_policy_entropy_b, sum_policy_ul_a,
+                           sum_policy_ul_b), end='')
+        else:
+            print(
+                "step {}, policy={:g} value={:g} policy accuracy={:g}% value accuracy={:g}% mse={:g} policy entropy={:g} policy ul={:g}". \
+                    format(steps, sum_policy, sum_value, sum_policy_accuracy, sum_value_accuracy, sum_mse,
+                           sum_policy_entropy, sum_policy_ul), end='')
 
         if self.moves_left:
             print(" moves={:g} moves mean={:g}".format(
@@ -1009,28 +1193,56 @@ class TFProcess:
             w.assign(old)
 
     def calculate_test_validations_v2(self, steps):
-        sum_policy_accuracy = 0
+        if self.POLICY_HEAD == pb.NetworkFormat.POLICY_HYDRA:
+            sum_policy_accuracy_a = 0
+            sum_policy_accuracy_b = 0
+            sum_policy_a = 0
+            sum_policy_b = 0
+            sum_policy_entropy_a = 0
+            sum_policy_entropy_b = 0
+            sum_policy_ul_a = 0
+            sum_policy_ul_b = 0
+        else:
+            sum_policy_accuracy = 0
+            sum_policy = 0
+            sum_policy_entropy = 0
+            sum_policy_ul = 0
         sum_value_accuracy = 0
         sum_moves_left = 0
         sum_moves_left_mean_error = 0
         sum_mse = 0
-        sum_policy = 0
         sum_value = 0
-        sum_policy_entropy = 0
-        sum_policy_ul = 0
         counter = 0
         for (x, y, z, q, m) in self.validation_dataset:
             if self.strategy is not None:
-                policy_loss, value_loss, moves_left_loss, mse_loss, policy_accuracy, value_accuracy, moves_left_mean_error, policy_entropy, policy_ul = self.strategy_calculate_test_summaries_inner_loop(
-                    x, y, z, q, m)
+                if self.POLICY_HEAD == pb.NetworkFormat.POLICY_HYDRA:
+                    policy_loss_a, policy_loss_b, value_loss, moves_left_loss, mse_loss, policy_accuracy_a, policy_accuracy_b, value_accuracy, moves_left_mean_error, policy_entropy_a, policy_entropy_b, policy_ul_a, policy_ul_b = self.strategy_calculate_test_summaries_inner_loop(
+                        x, y, z, q, m)
+                else:
+                    policy_loss, value_loss, moves_left_loss, mse_loss, policy_accuracy, value_accuracy, moves_left_mean_error, policy_entropy, policy_ul = self.strategy_calculate_test_summaries_inner_loop(
+                        x, y, z, q, m)
             else:
-                policy_loss, value_loss, moves_left_loss, mse_loss, policy_accuracy, value_accuracy, moves_left_mean_error, policy_entropy, policy_ul = self.calculate_test_summaries_inner_loop(
-                    x, y, z, q, m)
-            sum_policy_accuracy += policy_accuracy
-            sum_policy_entropy += policy_entropy
-            sum_policy_ul += policy_ul
+                if self.POLICY_HEAD == pb.NetworkFormat.POLICY_HYDRA:
+                    policy_loss_a, policy_loss_b, value_loss, moves_left_loss, mse_loss, policy_accuracy_a, policy_accuracy_b, value_accuracy, moves_left_mean_error, policy_entropy_a, policy_entropy_b, policy_ul_a, policy_ul_b = self.calculate_test_summaries_inner_loop(
+                        x, y, z, q, m)
+                else:
+                    policy_loss, value_loss, moves_left_loss, mse_loss, policy_accuracy, value_accuracy, moves_left_mean_error, policy_entropy, policy_ul = self.calculate_test_summaries_inner_loop(
+                        x, y, z, q, m)
+            if self.POLICY_HEAD == pb.NetworkFormat.POLICY_HYDRA:
+                sum_policy_accuracy_a += policy_accuracy_a
+                sum_policy_accuracy_b += policy_accuracy_b
+                sum_policy_entropy_a += policy_entropy_a
+                sum_policy_entropy_b += policy_entropy_b
+                sum_policy_ul_a += policy_ul_a
+                sum_policy_ul_b += policy_ul_b
+                sum_policy_a += policy_loss_a
+                sum_policy_b += policy_loss_b
+            else:
+                sum_policy_accuracy += policy_accuracy
+                sum_policy_entropy += policy_entropy
+                sum_policy_ul += policy_ul
+                sum_policy += policy_loss
             sum_mse += mse_loss
-            sum_policy += policy_loss
             if self.moves_left:
                 sum_moves_left += moves_left_loss
                 sum_moves_left_mean_error += moves_left_mean_error
@@ -1038,11 +1250,23 @@ class TFProcess:
             if self.wdl:
                 sum_value_accuracy += value_accuracy
                 sum_value += value_loss
-        sum_policy_accuracy /= counter
-        sum_policy_accuracy *= 100
-        sum_policy /= counter
-        sum_policy_entropy /= counter
-        sum_policy_ul /= counter
+        if self.POLICY_HEAD == pb.NetworkFormat.POLICY_HYDRA:
+            sum_policy_accuracy_a /= counter
+            sum_policy_accuracy_b /= counter
+            sum_policy_accuracy_a *= 100
+            sum_policy_accuracy_b *= 100
+            sum_policy_a /= counter
+            sum_policy_b /= counter
+            sum_policy_entropy_a /= counter
+            sum_policy_entropy_b /= counter
+            sum_policy_ul_a /= counter
+            sum_policy_ul_b /= counter
+        else:
+            sum_policy_accuracy /= counter
+            sum_policy_accuracy *= 100
+            sum_policy /= counter
+            sum_policy_entropy /= counter
+            sum_policy_ul /= counter
         sum_value /= counter
         if self.wdl:
             sum_value_accuracy /= counter
@@ -1053,14 +1277,28 @@ class TFProcess:
         # Additionally rescale to [0, 1] so divide by 4
         sum_mse /= (4.0 * counter)
         with self.validation_writer.as_default():
-            tf.summary.scalar("Policy Loss", sum_policy, step=steps)
+            if self.POLICY_HEAD == pb.NetworkFormat.POLICY_HYDRA:
+                tf.summary.scalar("Policy Loss A", sum_policy_a, step=steps)
+                tf.summary.scalar("Policy Loss B", sum_policy_b, step=steps)
+                tf.summary.scalar("Policy Accuracy A",
+                                  sum_policy_accuracy_a,
+                                  step=steps)
+                tf.summary.scalar("Policy Accuracy B",
+                                  sum_policy_accuracy_b,
+                                  step=steps)
+                tf.summary.scalar("Policy Entropy A", sum_policy_entropy_a, step=steps)
+                tf.summary.scalar("Policy Entropy B", sum_policy_entropy_b, step=steps)
+                tf.summary.scalar("Policy UL A", sum_policy_ul_a, step=steps)
+                tf.summary.scalar("Policy UL B", sum_policy_ul_b, step=steps)
+            else:
+                tf.summary.scalar("Policy Loss", sum_policy, step=steps)
+                tf.summary.scalar("Policy Accuracy",
+                                  sum_policy_accuracy,
+                                  step=steps)
+                tf.summary.scalar("Policy Entropy", sum_policy_entropy, step=steps)
+                tf.summary.scalar("Policy UL", sum_policy_ul, step=steps)
             tf.summary.scalar("Value Loss", sum_value, step=steps)
             tf.summary.scalar("MSE Loss", sum_mse, step=steps)
-            tf.summary.scalar("Policy Accuracy",
-                              sum_policy_accuracy,
-                              step=steps)
-            tf.summary.scalar("Policy Entropy", sum_policy_entropy, step=steps)
-            tf.summary.scalar("Policy UL", sum_policy_ul, step=steps)
             if self.wdl:
                 tf.summary.scalar("Value Accuracy",
                                   sum_value_accuracy,
@@ -1074,8 +1312,17 @@ class TFProcess:
                                   step=steps)
         self.validation_writer.flush()
 
-        print("step {}, validation: policy={:g} value={:g} policy accuracy={:g}% value accuracy={:g}% mse={:g} policy entropy={:g} policy ul={:g}".\
-            format(steps, sum_policy, sum_value, sum_policy_accuracy, sum_value_accuracy, sum_mse, sum_policy_entropy, sum_policy_ul), end='')
+        if self.POLICY_HEAD == pb.NetworkFormat.POLICY_HYDRA:
+            print(
+                "step {} validation: policy a={:g} policy b={:g} value={:g} policy accuracy a={:g}% policy accuracy b={:g}% value accuracy={:g}% mse={:g} policy entropy a={:g} policy entropy b={:g} policy ul a={:g} policy ul b={:g}". \
+                    format(steps, sum_policy_a, sum_policy_b, sum_value, sum_policy_accuracy_a, sum_policy_accuracy_b,
+                           sum_value_accuracy, sum_mse, sum_policy_entropy_a, sum_policy_entropy_b, sum_policy_ul_a,
+                           sum_policy_ul_b), end='')
+        else:
+            print(
+                "step {} validation: policy={:g} value={:g} policy accuracy={:g}% value accuracy={:g}% mse={:g} policy entropy={:g} policy ul={:g}". \
+                    format(steps, sum_policy, sum_value, sum_policy_accuracy, sum_value_accuracy, sum_mse,
+                           sum_policy_entropy, sum_policy_ul), end='')
 
         if self.moves_left:
             print(" moves={:g} moves mean={:g}".format(
@@ -1288,7 +1535,7 @@ class TFProcess:
                                           name='residual_{}'.format(i + 1))
 
         # Policy head
-        if self.POLICY_HEAD == pb.NetworkFormat.POLICY_CONVOLUTION:
+        if self.POLICY_HEAD == pb.NetworkFormat.POLICY_CONVOLUTION or self.POLICY_HEAD == pb.NetworkFormat.POLICY_HYDRA:
             conv_pol = self.conv_block_v2(
                 flow,
                 filter_size=3,
@@ -1304,7 +1551,10 @@ class TFProcess:
                 bias_regularizer=self.l2reg,
                 data_format='channels_first',
                 name='policy')(conv_pol)
-            h_fc1 = ApplyPolicyMap()(conv_pol2)  # 80x8x8
+            if self.POLICY_HEAD == pb.NetworkFormat.POLICY_HYDRA:
+                h_fc1 = [ApplyPolicyMap()(conv_pol2)]  # list format for hydra head
+            else:
+                h_fc1 = ApplyPolicyMap()(conv_pol2)
         elif self.POLICY_HEAD == pb.NetworkFormat.POLICY_CLASSICAL:
             conv_pol = self.conv_block_v2(flow,
                                           filter_size=1,
@@ -1317,7 +1567,7 @@ class TFProcess:
                                           bias_regularizer=self.l2reg,
                                           name='policy/dense')(h_conv_pol_flat)
         ### SELF-ATTENTION POLICY ###
-        elif self.POLICY_HEAD == pb.NetworkFormat.POLICY_ATTENTION:
+        if self.POLICY_HEAD == pb.NetworkFormat.POLICY_ATTENTION or self.POLICY_HEAD == pb.NetworkFormat.POLICY_HYDRA:
             # transpose and reshape
             tokens = tf.transpose(flow, perm=[0, 2, 3, 1])
             tokens = tf.reshape(tokens, [-1, 64, self.RESIDUAL_FILTERS])
@@ -1384,7 +1634,11 @@ class TFProcess:
             attn_wts.append(policy_attn_logits)
 
             # APPLY POLICY MAP -- output becomes Bx1856
-            h_fc1 = ApplyAttentionPolicyMap(dtype=policy_attn_logits.dtype)(policy_attn_logits, promotion_logits)
+            if self.POLICY_HEAD == pb.NetworkFormat.POLICY_HYDRA:
+                h_fc1.append(ApplyAttentionPolicyMap(dtype=policy_attn_logits.dtype)(policy_attn_logits,
+                                                                                     promotion_logits))
+            else:
+                h_fc1 = ApplyAttentionPolicyMap(dtype=policy_attn_logits.dtype)(policy_attn_logits, promotion_logits)
 
         else:
             raise ValueError("Unknown policy head type {}".format(
@@ -1437,6 +1691,6 @@ class TFProcess:
             h_fc5 = None
 
         # attention weights added as additional output for visualization script -- not necessary for engine to perform
-        if self.POLICY_HEAD == pb.NetworkFormat.POLICY_ATTENTION:
+        if self.POLICY_HEAD == pb.NetworkFormat.POLICY_ATTENTION or self.POLICY_HEAD == pb.NetworkFormat.POLICY_HYDRA:
             return h_fc1, h_fc3, h_fc5, attn_wts
         return h_fc1, h_fc3, h_fc5

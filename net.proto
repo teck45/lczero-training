@@ -110,6 +110,8 @@ message Weights {
   optional Layer ip3_pol_b = 20;
   optional Layer ip4_pol_w = 22;  // "ppo" in policy attention
   optional Layer ip4_pol_b = 23;
+  optional Layer ip5_pol_w = 24;  // might be needed for hydra policy
+  optional Layer ip5_pol_b = 25;
   // Policy encoder stack
   repeated EncoderLayer encoder_pol = 21;
 
@@ -135,6 +137,11 @@ message TrainingParams {
   optional float policy_loss = 4;
   optional float accuracy = 5;
   optional string lc0_params = 6;
+  optional float policy_loss_a = 7;  // 7-10 are for hydra policy
+  optional float policy_loss_b = 8;
+  optional float accuracy_a = 9;
+  optional float accuracy_b = 10;
+
 }
 
 message NetworkFormat {
@@ -178,6 +185,7 @@ message NetworkFormat {
     POLICY_CLASSICAL = 1;
     POLICY_CONVOLUTION = 2;
     POLICY_ATTENTION = 3;
+    POLICY_HYDRA = 4;
   }
   optional PolicyFormat policy = 4;
 
