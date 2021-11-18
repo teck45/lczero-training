@@ -242,16 +242,16 @@ class TFProcess:
         input_var = tf.keras.Input(shape=(112, 8 * 8))
         x_planes = tf.keras.layers.Reshape([112, 8, 8])(input_var)
         # attention weights added as additional output for visualization script -- not necessary for engine to perform
-        if self.POLICY_HEAD == pb.NetworkFormat.POLICY_ATTENTION or pb.NetworkFormat.POLICY_HYDRA:
+        if self.POLICY_HEAD == pb.NetworkFormat.POLICY_ATTENTION or self.POLICY_HEAD == pb.NetworkFormat.POLICY_HYDRA:
             policy, value, moves_left, attn_wts = self.construct_net_v2(x_planes)
         else:
             policy, value, moves_left = self.construct_net_v2(x_planes)
         if self.moves_left:
-            if self.POLICY_HEAD == pb.NetworkFormat.POLICY_ATTENTION or pb.NetworkFormat.POLICY_HYDRA:
+            if self.POLICY_HEAD == pb.NetworkFormat.POLICY_ATTENTION or self.POLICY_HEAD == pb.NetworkFormat.POLICY_HYDRA:
                 outputs = [policy, value, moves_left, attn_wts]
             else:
                 outputs = [policy, value, moves_left]
-        elif self.POLICY_HEAD == pb.NetworkFormat.POLICY_ATTENTION or pb.NetworkFormat.POLICY_HYDRA:
+        elif self.POLICY_HEAD == pb.NetworkFormat.POLICY_ATTENTION or self.POLICY_HEAD == pb.NetworkFormat.POLICY_HYDRA:
             outputs = [policy, value, attn_wts]
         else:
             outputs = [policy, value]
@@ -1567,7 +1567,7 @@ class TFProcess:
                                           bias_regularizer=self.l2reg,
                                           name='policy/dense')(h_conv_pol_flat)
         ### SELF-ATTENTION POLICY ###
-        if self.POLICY_HEAD == pb.NetworkFormat.POLICY_ATTENTION or self.POLICY_HEAD == pb.NetworkFormat.POLICY_HYDRA:
+        elif self.POLICY_HEAD == pb.NetworkFormat.POLICY_ATTENTION or self.POLICY_HEAD == pb.NetworkFormat.POLICY_HYDRA:
             # transpose and reshape
             tokens = tf.transpose(flow, perm=[0, 2, 3, 1])
             tokens = tf.reshape(tokens, [-1, 64, self.RESIDUAL_FILTERS])
