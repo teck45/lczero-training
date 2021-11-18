@@ -1566,7 +1566,7 @@ class TFProcess:
                                           kernel_regularizer=self.l2reg,
                                           bias_regularizer=self.l2reg,
                                           name='policy/dense')(h_conv_pol_flat)
-        else:
+        elif self.POLICY_HEAD != pb.NetworkFormat.POLICY_ATTENTION:
             raise ValueError("Unknown policy head type {}".format(
                 self.POLICY_HEAD))
 
