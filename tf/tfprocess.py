@@ -1571,7 +1571,7 @@ class TFProcess:
                 self.POLICY_HEAD))
 
         ### SELF-ATTENTION POLICY ###
-        elif self.POLICY_HEAD == pb.NetworkFormat.POLICY_ATTENTION or self.POLICY_HEAD == pb.NetworkFormat.POLICY_HYDRA:
+        if self.POLICY_HEAD == pb.NetworkFormat.POLICY_ATTENTION or self.POLICY_HEAD == pb.NetworkFormat.POLICY_HYDRA:
             # transpose and reshape
             tokens = tf.transpose(flow, perm=[0, 2, 3, 1])
             tokens = tf.reshape(tokens, [-1, 64, self.RESIDUAL_FILTERS])
