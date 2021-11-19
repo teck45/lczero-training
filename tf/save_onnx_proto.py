@@ -8,7 +8,7 @@ it as a proto file that can be read and loaded by the onnx backend.
 
 This file is step 9 in the conversion process.
 
-Script provided by Borg.
+Script provided by borg323.
 """
 
 net = Net(net=pb.NetworkFormat.NETWORK_ONNX)

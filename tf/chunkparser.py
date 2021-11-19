@@ -34,12 +34,13 @@ byte padding is done in chunkparser.ChunkParser.sample_record()
 sample_record() also skips most training records to avoid sampling over-correlated
 positions since they typically are from sequential positions in a game.
 
-Current implementation of "value focus" also is in sample_record() and works by
-probabilistically skipping records according to how accurate the no-search 
-eval ('orig_q') is compared to eval after search ('best_q'). It does not use
-draw values at this point. Putting value focus here is efficient because
-it runs in parallel workers and peeks at the records without requiring any
-unpacking.
+Current implementation of "diff focus" also is in sample_record() and works by
+probabilistically skipping records according to how accurate the no-search
+eval ('orig_q') is compared to eval after search ('best_q') as well as the
+recorded policy_kld (a measure of difference between no search policy and the
+final policy distribution). It does not use draw values at this point. Putting
+diff focus here is efficient because it runs in parallel workers and peeks at
+the records without requiring any unpacking.
 
 The constructor for chunkparser.ChunkParser() sets a bunch of class constants
 and creates a fixed number of parallel Python multiprocessing.Pipe objects,
@@ -63,7 +64,6 @@ import numpy as np
 import random
 import shufflebuffer as sb
 import struct
-import tensorflow as tf
 import unittest
 import gzip
 from select import select
@@ -119,8 +119,6 @@ def chunk_reader(chunk_filenames, chunk_filename_queue):
 
 
 class ChunkParser:
-    # static batch size
-    BATCH_SIZE = 8
 
     def __init__(self,
                  chunks,
@@ -129,13 +127,16 @@ class ChunkParser:
                  sample=1,
                  buffer_size=1,
                  batch_size=256,
-                 value_focus_min=1,
-                 value_focus_slope=0,
+                 diff_focus_min=1,
+                 diff_focus_slope=0,
+                 diff_focus_q_weight=6.0,
+                 diff_focus_pol_scale=3.5,
                  workers=None):
         self.inner = ChunkParserInner(self, chunks, expected_input_format,
                                       shuffle_size, sample, buffer_size,
-                                      batch_size, value_focus_min,
-                                      value_focus_slope, workers)
+                                      batch_size, diff_focus_min,
+                                      diff_focus_slope, diff_focus_q_weight,
+                                      diff_focus_pol_scale, workers)
 
     def shutdown(self):
         """
@@ -149,33 +150,18 @@ class ChunkParser:
         self.chunk_process.terminate()
         self.chunk_process.join()
 
-    @staticmethod
-    def parse_function(planes, probs, winner, q, plies_left):
-        """
-        Convert unpacked record batches to tensors for tensorflow training
-        """
-        planes = tf.io.decode_raw(planes, tf.float32)
-        probs = tf.io.decode_raw(probs, tf.float32)
-        winner = tf.io.decode_raw(winner, tf.float32)
-        q = tf.io.decode_raw(q, tf.float32)
-        plies_left = tf.io.decode_raw(plies_left, tf.float32)
-
-        planes = tf.reshape(planes, (ChunkParser.BATCH_SIZE, 112, 8 * 8))
-        probs = tf.reshape(probs, (ChunkParser.BATCH_SIZE, 1858))
-        winner = tf.reshape(winner, (ChunkParser.BATCH_SIZE, 3))
-        q = tf.reshape(q, (ChunkParser.BATCH_SIZE, 3))
-        plies_left = tf.reshape(plies_left, (ChunkParser.BATCH_SIZE, ))
-
-        return (planes, probs, winner, q, plies_left)
-
     def parse(self):
         return self.inner.parse()
+
+    def sequential(self):
+        return self.inner.sequential()
 
 
 class ChunkParserInner:
     def __init__(self, parent, chunks, expected_input_format, shuffle_size,
-                 sample, buffer_size, batch_size, value_focus_min,
-                 value_focus_slope, workers):
+                 sample, buffer_size, batch_size, diff_focus_min,
+                 diff_focus_slope, diff_focus_q_weight, diff_focus_pol_scale,
+                 workers):
         """
         Read data and yield batches of raw tensors.
 
@@ -183,7 +169,7 @@ class ChunkParserInner:
         'chunks' list of chunk filenames.
         'shuffle_size' is the size of the shuffle buffer.
         'sample' is the rate to down-sample.
-        'value_focus_min' and 'value_focus_slope' control value focus
+        'diff_focus_min', 'diff_focus_slope', 'diff_focus_q_weight' and 'diff_focus_pol_scale' control diff focus
         'workers' is the number of child workers to use.
 
         The data is represented in a number of formats through this dataflow
@@ -210,9 +196,11 @@ class ChunkParserInner:
 
         # set the down-sampling rate
         self.sample = sample
-        # set the min and slope for value focus, defaults accept all positions
-        self.value_focus_min = value_focus_min
-        self.value_focus_slope = value_focus_slope
+        # set the details for diff focus, defaults accept all positions
+        self.diff_focus_min = diff_focus_min
+        self.diff_focus_slope = diff_focus_slope
+        self.diff_focus_q_weight = diff_focus_q_weight
+        self.diff_focus_pol_scale = diff_focus_pol_scale
         # set the mini-batch size
         self.batch_size = batch_size
         # set number of elements in the shuffle buffer.
@@ -221,28 +209,31 @@ class ChunkParserInner:
         if workers is None:
             workers = max(1, mp.cpu_count() - 2)
 
-        print("Using {} worker processes.".format(workers))
+        if workers > 0:
+            print("Using {} worker processes.".format(workers))
 
-        # Start the child workers running
-        self.readers = []
-        self.writers = []
-        parent.processes = []
-        self.chunk_filename_queue = mp.Queue(maxsize=4096)
-        for _ in range(workers):
-            read, write = mp.Pipe(duplex=False)
-            p = mp.Process(target=self.task,
-                           args=(self.chunk_filename_queue, write))
-            p.daemon = True
-            parent.processes.append(p)
-            p.start()
-            self.readers.append(read)
-            self.writers.append(write)
+            # Start the child workers running
+            self.readers = []
+            self.writers = []
+            parent.processes = []
+            self.chunk_filename_queue = mp.Queue(maxsize=4096)
+            for _ in range(workers):
+                read, write = mp.Pipe(duplex=False)
+                p = mp.Process(target=self.task,
+                               args=(self.chunk_filename_queue, write))
+                p.daemon = True
+                parent.processes.append(p)
+                p.start()
+                self.readers.append(read)
+                self.writers.append(write)
 
-        parent.chunk_process = mp.Process(target=chunk_reader,
-                                          args=(chunks,
-                                                self.chunk_filename_queue))
-        parent.chunk_process.daemon = True
-        parent.chunk_process.start()
+            parent.chunk_process = mp.Process(target=chunk_reader,
+                                              args=(chunks,
+                                                    self.chunk_filename_queue))
+            parent.chunk_process.daemon = True
+            parent.chunk_process.start()
+        else:
+            self.chunks = chunks
 
         self.init_structs()
 
@@ -414,8 +405,8 @@ class ChunkParserInner:
     def sample_record(self, chunkdata):
         """
         Randomly sample through the v3/4/5/6 chunk data and select records in v6 format
-        Downsampling to avoid highly correlated positions skips most records, and 
-        value focus may also skip some records.
+        Downsampling to avoid highly correlated positions skips most records, and
+        diff focus may also skip some records.
         """
         version = chunkdata[0:4]
         if version == V6_VERSION:
@@ -450,18 +441,62 @@ class ChunkParserInner:
                 record += 48 * b'\x00'
 
             if version == V6_VERSION:
-                # value focus code, peek at best_q and orig_q from record (unpacks as tuple with one item)
+                # diff focus code, peek at best_q, orig_q and pol_kld from record (unpacks as tuple with one item)
                 best_q = struct.unpack('f', record[8284:8288])[0]
                 orig_q = struct.unpack('f', record[8328:8332])[0]
+                pol_kld = struct.unpack('f', record[8348:8352])[0]
 
-                # if orig_q is NaN, accept, else accept based on value focus
-                if not np.isnan(orig_q):
+                # if orig_q is NaN or pol_kld is 0, accept, else accept based on diff focus
+                if not np.isnan(orig_q) and pol_kld > 0:
                     diff_q = abs(best_q - orig_q)
-                    thresh_p = self.value_focus_min + self.value_focus_slope * diff_q
+                    q_weight = self.diff_focus_q_weight
+                    pol_scale = self.diff_focus_pol_scale
+                    total = (q_weight * diff_q + pol_kld) / (q_weight +
+                                                             pol_scale)
+                    thresh_p = self.diff_focus_min + self.diff_focus_slope * total
                     if thresh_p < 1.0 and random.random() > thresh_p:
                         continue
 
             yield record
+
+    def single_file_gen(self, filename):
+        try:
+            with gzip.open(filename, 'rb') as chunk_file:
+                version = chunk_file.read(4)
+                chunk_file.seek(0)
+                if version == V6_VERSION:
+                    record_size = self.v6_struct.size
+                elif version == V5_VERSION:
+                    record_size = self.v5_struct.size
+                elif version == V4_VERSION:
+                    record_size = self.v4_struct.size
+                elif version == V3_VERSION:
+                    record_size = self.v3_struct.size
+                else:
+                    print('Unknown version {} in file {}'.format(
+                        version, filename))
+                    return
+                while True:
+                    chunkdata = chunk_file.read(256 * record_size)
+                    if len(chunkdata) == 0:
+                        break
+                    for item in self.sample_record(chunkdata):
+                        yield item
+
+        except:
+            print("failed to parse {}".format(filename))
+
+    def sequential_gen(self):
+        for filename in self.chunks:
+            for item in self.single_file_gen(filename):
+                yield item
+
+    def sequential(self):
+        gen = self.sequential_gen()  # read from all files in order in this process.
+        gen = self.tuple_gen(gen)  # convert v6->tuple
+        gen = self.batch_gen(gen, allow_partial=False)  # assemble into batches
+        for b in gen:
+            yield b
 
     def task(self, chunk_filename_queue, writer):
         """
@@ -471,32 +506,8 @@ class ChunkParserInner:
         self.init_structs()
         while True:
             filename = chunk_filename_queue.get()
-            try:
-                with gzip.open(filename, 'rb') as chunk_file:
-                    version = chunk_file.read(4)
-                    chunk_file.seek(0)
-                    if version == V6_VERSION:
-                        record_size = self.v6_struct.size
-                    elif version == V5_VERSION:
-                        record_size = self.v5_struct.size
-                    elif version == V4_VERSION:
-                        record_size = self.v4_struct.size
-                    elif version == V3_VERSION:
-                        record_size = self.v3_struct.size
-                    else:
-                        print('Unknown version {} in file {}'.format(
-                            version, filename))
-                        continue
-                    while True:
-                        chunkdata = chunk_file.read(256 * record_size)
-                        if len(chunkdata) == 0:
-                            break
-                        for item in self.sample_record(chunkdata):
-                            writer.send_bytes(item)
-
-            except:
-                print("failed to parse {}".format(filename))
-                continue
+            for item in self.single_file_gen(filename):
+                writer.send_bytes(item)
 
     def v6_gen(self):
         """
@@ -530,7 +541,7 @@ class ChunkParserInner:
         for r in gen:
             yield self.convert_v6_to_tuple(r)
 
-    def batch_gen(self, gen):
+    def batch_gen(self, gen, allow_partial=True):
         """
         Pack multiple records into a single batch
         """
@@ -538,7 +549,7 @@ class ChunkParserInner:
         # a list because we need to reuse it.
         while True:
             s = list(itertools.islice(gen, self.batch_size))
-            if not len(s):
+            if not len(s) or (not allow_partial and len(s) != self.batch_size):
                 return
             yield (b''.join([x[0] for x in s]), b''.join([x[1] for x in s]),
                    b''.join([x[2] for x in s]), b''.join([x[3] for x in s]),
@@ -646,54 +657,6 @@ class ChunkParserTest(unittest.TestCase):
             self.assertTrue(np.abs(scalar_win - truth[3]) < 1e-6)
             scalar_q = data[4][0] - data[4][-1]
             self.assertTrue(np.abs(scalar_q - truth[4]) < 1e-6)
-
-        parser.shutdown()
-
-    def test_tensorflow_parsing(self):
-        """
-        Test game position decoding pipeline including tensorflow.
-        """
-        truth = self.generate_fake_pos()
-        batch_size = 4
-        ChunkParser.BATCH_SIZE = batch_size
-        records = []
-        for i in range(batch_size):
-            record = b''
-            for j in range(2):
-                record += self.v4_record(*truth)
-            records.append(record)
-
-        parser = ChunkParser(ChunkDataSrc(records),
-                             shuffle_size=1,
-                             workers=1,
-                             batch_size=batch_size)
-        batchgen = parser.parse()
-        data = next(batchgen)
-
-        planes = np.frombuffer(data[0],
-                               dtype=np.float32,
-                               count=112 * 8 * 8 * batch_size)
-        planes = planes.reshape(batch_size, 112, 8 * 8)
-        probs = np.frombuffer(data[1],
-                              dtype=np.float32,
-                              count=1858 * batch_size)
-        probs = probs.reshape(batch_size, 1858)
-        winner = np.frombuffer(data[2], dtype=np.float32, count=3 * batch_size)
-        winner = winner.reshape(batch_size, 3)
-        best_q = np.frombuffer(data[3], dtype=np.float32, count=3 * batch_size)
-        best_q = best_q.reshape(batch_size, 3)
-
-        # Pass it through tensorflow
-        with tf.compat.v1.Session() as sess:
-            graph = ChunkParser.parse_function(data[0], data[1], data[2],
-                                               data[3])
-            tf_planes, tf_probs, tf_winner, tf_q = sess.run(graph)
-
-            for i in range(batch_size):
-                self.assertTrue((probs[i] == tf_probs[i]).all())
-                self.assertTrue((planes[i] == tf_planes[i]).all())
-                self.assertTrue((winner[i] == tf_winner[i]).all())
-                self.assertTrue((best_q[i] == tf_q[i]).all())
 
         parser.shutdown()
 

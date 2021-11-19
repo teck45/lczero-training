@@ -64,13 +64,6 @@ def make_map():
                     )
                 )
             )
-    # print(traversable)
-    # print(traversable[-16:-8])
-    # print(sum([a.__len__() for a in traversable]))
-
-    # for static promotion logits:
-    # z = np.zeros((64*64, 1858-66), dtype=np.int32)
-
     # for promotion policy:
     z = np.zeros((64*64+8*24, 1858), dtype=np.int32)
 
@@ -82,7 +75,7 @@ def make_map():
                 z[putdown_index + (64*pickup_index), i] = 1
                 i += 1
 
-    # for promotion policy (3rd draft) -- 2nd loop for promotions (for i in 1792:1858, stride by ls[j])
+    # second loop for promotions (for i in 1792:1858, stride by ls[j])
     j = 0
     j1 = np.array([3, -2, 3, -2, 3])
     j2 = np.array([3, 3, -5, 3, 3, -5, 3, 3, 1])
@@ -102,39 +95,3 @@ def make_map():
                 j += 1
 
     return z
-
-
-# z = make_map()
-# print(sum(sum(z)))
-# print(np.shape(z))
-
-# promotion concept 3
-# 1792 = a7a8q  4096
-# 1793 = a7a8r  4097
-# 1794 = a7a8b  4098
-# 1795 = a7b8q  4099
-# 1796 = a7b8r  4100
-# 1797 = a7b8b  4101
-#
-# 1798 = b7a8q  4120
-# 1799 = b7a8r  4121
-# 1800 = b7a8b  4122
-# 1801 = b7b8q  4123
-# 1802 = b7b8r  4124
-# 1803 = b7b8b  4125
-# 1804 = b7c8q  4126
-# 1805 = b7c8r  4127
-# 1806 = b7c8b  4128
-#
-# ...
-
-# for debugger:
-# import chess
-# from tf.policy_index import policy_index
-# a = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h']
-# b = ['q', 'r', 'b']
-# at each iteration of the second loop:
-# print((4096 + pickup_file*24 + (promotion_file*3+promotion_row), i))
-# print(policy_index[i])
-# print(chess.square_name(pickup_index)+a[promotion_file]+'8'+b[promotion_row])
-

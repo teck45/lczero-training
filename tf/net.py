@@ -145,6 +145,15 @@ class Net:
         self.fill_layer(se_unit.b1, weights)
         self.fill_layer(se_unit.w1, weights)
 
+    def fill_mha(self, mha, weights):
+        pass
+
+    def fill_ffn(self, ffn, weights):
+        pass
+
+    def fill_encoder_layer(self, encoderlayer, weights, gammas):
+        pass
+
     def denorm_layer_v2(self, layer):
         """Denormalize a layer from protobuf"""
         params = np.frombuffer(layer.params, np.uint16).astype(np.float32)
