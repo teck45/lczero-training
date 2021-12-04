@@ -102,8 +102,8 @@ message Weights {
   // Extra convolution for AZ-style policy head
   optional ConvBlock policy1 = 11;
   optional ConvBlock policy = 3;
-  optional Layer ip1_pol_w = 4;   // "embedding" in policy attention
-  optional Layer ip1_pol_b = 5;
+  optional Layer ip_pol_w = 4;    // "embedding" in policy attention
+  optional Layer ip_pol_b = 5;
   optional Layer ip2_pol_w = 17;  // "wq" in policy attention
   optional Layer ip2_pol_b = 18;
   optional Layer ip3_pol_w = 19;  // "wk" in policy attention
