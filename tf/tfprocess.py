@@ -1015,11 +1015,21 @@ class TFProcess:
                        (1. / (num + 1.)))
         self.swa_count.assign(min(num + 1., self.swa_max_n))
 
-    def save_swa_weights(self, filename):
+    def save_swa_weights(self, filename, steps):
         backup = self.read_weights()
         for (swa, w) in zip(self.swa_weights, self.model.weights):
             w.assign(swa.read_value())
         self.save_leelaz_weights(filename)
+        #############################################
+        if steps == 5000:
+            print("saving 5k model")
+            self.model.save("/home/admin/tf_saved_models/20b_00_saved_model_5k")
+            print("success!")
+        if steps == 100_000:
+            print("saving 100k model")
+            self.model.save("/home/admin/tf_saved_models/20b_00_saved_model_100k")
+            print("success!")
+        #############################################
         for (old, w) in zip(backup, self.model.weights):
             w.assign(old)
 
@@ -1237,10 +1247,14 @@ class TFProcess:
                                          kernel_regularizer=self.l2reg, name='policy/attention/wk')(tokens)
 
             dk = tf.math.sqrt(tf.cast(tf.shape(keys)[-1], keys.dtype))  # constant for scaling
+            # PPO layer promotion offsets
             promotion_keys = keys[:, -8:, :]
-            promotion_offsets = tf.keras.layers.Dense(3, kernel_initializer='glorot_normal',
-                                                      kernel_regularizer=self.l2reg, name='policy/ppo')(promotion_keys)
-            promotion_offsets = tf.transpose(promotion_offsets, perm=[0, 2, 1]) * dk  # Bx3x8
+            promotion_offsets = tf.keras.layers.Dense(3, kernel_initializer='glorot_normal',  # 4
+                                                      kernel_regularizer=self.l2reg, name='policy/ppo',
+                                                      use_bias=False)(promotion_keys)  # True
+            promotion_offsets = tf.transpose(promotion_offsets, perm=[0, 2, 1]) * dk  # Bx3x8 (Bx4x8)
+            # add the knight offset to the others
+            # promotion_offsets = promotion_offsets[:, :3, :] + promotion_offsets[:, 3:4, :]
 
             # MULTI-HEAD ATTENTION
             # split heads, does nothing if n_heads_pol_hd is 1
