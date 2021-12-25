@@ -1,1 +1,99 @@
-/media/datadrive01/Chess/lc0/20b.yaml
+%YAML 1.2
+---
+name: '20b_00'
+gpu: 0,1,2,3 # 0 or all or 'all'
+dataset:
+  num_chunks: 50_000_000 #390 for 5M
+  allow_less_chunks: true # to avoid errors in case, since number of chunks fluctuate little bit
+  train_ratio: 0.9
+  sort_type: name
+  input: '/mnt/data/t60/*/'
+  input_validation: '/mnt/data/validation/t74+t76/*/'
+  experimental_v5_only_dataset: false
+  train_workers: 24
+  test_workers: 12
+training:
+    precision: half
+    swa: true
+    swa_output: true
+    swa_max_n: 10
+    swa_steps: 100
+    max_grad_norm: 1
+    batch_size: 1024 
+    num_batch_splits: 1 
+    q_ratio: 0
+    value_focus_min: 1.0
+    value_focus_slope: 0.0
+    lookahead_optimizer: false
+    renorm: true
+    renorm_max_r: 1.0 
+    renorm_max_d: 0.0 
+    test_steps: 2500 
+    validation_steps: 5000 
+    num_test_positions: 131_072
+    train_avg_report_steps: 2500
+    total_steps: 200_000 
+    checkpoint_steps: 5000 
+    shuffle_size: 500_000
+    warmup_steps: 0
+    mask_legal_moves: true
+    lr_values:
+        - 0.2
+        - 0.16
+        - 0.128
+        - 0.1024
+        - 0.08192  # 500k
+        - 0.06554
+        - 0.05243
+        - 0.04194
+        - 0.03355
+        - 0.02684  # 1M
+        - 0.02147
+        - 0.01718
+        - 0.01374
+        - 0.01100
+        - 0.00880  # 1.5M
+        - 0.00704
+        - 0.00563
+        - 0.00450
+        - 0.00360
+        - 0.00288  # 2M
+    lr_boundaries:
+        - 100_000
+        - 200_000
+        - 300_000
+        - 400_000
+        - 500_000
+        - 600_000
+        - 700_000
+        - 800_000
+        - 900_000
+        - 1_000_000
+        - 1_100_000
+        - 1_200_000
+        - 1_300_000
+        - 1_400_000
+        - 1_500_000
+        - 1_600_000
+        - 1_700_000
+        - 1_800_000
+        - 1_900_000
+    policy_loss_weight: 1.0
+    value_loss_weight: 1.0
+    reg_term_weight: 1.0 
+    moves_left_loss_weight: 1.0
+    path: '/home/admin/lczero-training/nets'
+model:
+    filters: 256                         # Number of filters
+    residual_blocks: 20                  # Number of blocks
+    se_ratio: 8                          # Squeeze Excite structural network architecture.
+    emb_size_pol: 256                    # embedding vector size
+    enc_layers_pol: 0                    # number of encoder layers
+    dff_pol_enc: 000                     # size of the largest dense layer in encoder layer ffn
+    d_model_pol_enc: 000                 # size of the query, key, and value vectors in encoder layers
+    n_heads_pol_enc: 0                   # number of attention heads in encoder layers
+    d_model_pol_hd: 512                  # size of the query and key vectors in final attn. layer
+    n_heads_pol_hd: 1                    # number of heads in final attn. layer
+    policy: 'attention'                  # new option: attention
+    value: 'wdl'
+    moves_left: 'v1'
