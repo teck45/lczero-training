@@ -1,24 +1,24 @@
 %YAML 1.2
 ---
 name: '20b_00'
-gpu: 0,1,2,3 # 0 or all or 'all'
+gpu: all
 dataset:
-  num_chunks: 50_000_000 #390 for 5M
-  allow_less_chunks: true # to avoid errors in case, since number of chunks fluctuate little bit
+  num_chunks: 50_000_000
+  allow_less_chunks: true
   train_ratio: 0.9
   sort_type: name
   input: '/mnt/data/t60/*/'
-  input_validation: '/mnt/data/validation/t74+t76/*/'
+  input_validation: '/mnt/data/validation/t74+t76/'
   experimental_v5_only_dataset: false
-  train_workers: 24
-  test_workers: 12
+  train_workers: 12
+  test_workers: 6
 training:
-    precision: half
+    precision: single
     swa: true
     swa_output: true
     swa_max_n: 10
     swa_steps: 100
-    max_grad_norm: 1
+    max_grad_norm: 3.5
     batch_size: 1024 
     num_batch_splits: 1 
     q_ratio: 0
@@ -32,9 +32,9 @@ training:
     validation_steps: 5000 
     num_test_positions: 131_072
     train_avg_report_steps: 2500
-    total_steps: 200_000 
+    total_steps: 2_000_000
     checkpoint_steps: 5000 
-    shuffle_size: 500_000
+    shuffle_size: 300_000
     warmup_steps: 0
     mask_legal_moves: true
     lr_values:

@@ -844,7 +844,7 @@ class TFProcess:
             self.net.pb.training_params.training_steps = evaled_steps
             self.save_leelaz_weights(leela_path)
             if self.swa_enabled:
-                self.save_swa_weights(swa_path)
+                self.save_swa_weights(swa_path, steps)
 
         if self.profiling_start_step is not None and (
                 steps >= self.profiling_start_step +
@@ -1021,13 +1021,17 @@ class TFProcess:
             w.assign(swa.read_value())
         self.save_leelaz_weights(filename)
         #############################################
-        if steps == 5000:
-            print("saving 5k model")
-            self.model.save("/home/admin/tf_saved_models/20b_00_saved_model_5k")
+        if steps == 500_000:
+            print("saving 500k model")
+            self.model.save("/home/admin/tf_saved_models/20b_00_saved_model_500k")
             print("success!")
-        if steps == 100_000:
-            print("saving 100k model")
-            self.model.save("/home/admin/tf_saved_models/20b_00_saved_model_100k")
+        if steps == 1_000_000:
+            print("saving 1M model")
+            self.model.save("/home/admin/tf_saved_models/20b_00_saved_model_1M")
+            print("success!")
+        if steps == 1_500_000:
+            print("saving 1.5M model")
+            self.model.save("/home/admin/tf_saved_models/20b_00_saved_model_1.5M")
             print("success!")
         #############################################
         for (old, w) in zip(backup, self.model.weights):

@@ -244,7 +244,7 @@ def main(cmd):
     backup = tfprocess.read_weights()
     for (swa, w) in zip(tfprocess.swa_weights, tfprocess.model.weights):
         w.assign(swa.read_value())
-    tfprocess.model.save("/home/admin/tf_saved_models/20b_01_saved_model_200k")
+    tfprocess.model.save("/home/admin/tf_saved_models/20b_00_saved_model_2M")
     for (old, w) in zip(backup, tfprocess.model.weights):
         w.assign(old)
 
