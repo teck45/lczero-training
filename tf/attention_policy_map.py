@@ -64,9 +64,7 @@ def make_map():
                     )
                 )
             )
-    # for promotion policy:
     z = np.zeros((64*64+8*24, 1858), dtype=np.int32)
-
     # first loop for standard moves (for i in 0:1858, stride by 1)
     i = 0
     for pickup_index, putdown_indices in enumerate(traversable):
@@ -74,7 +72,6 @@ def make_map():
             if putdown_index < 64:
                 z[putdown_index + (64*pickup_index), i] = 1
                 i += 1
-
     # second loop for promotions (for i in 1792:1858, stride by ls[j])
     j = 0
     j1 = np.array([3, -2, 3, -2, 3])

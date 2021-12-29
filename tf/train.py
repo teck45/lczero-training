@@ -239,15 +239,6 @@ def main(cmd):
         else:
             tfprocess.save_leelaz_weights(cmd.output)
 
-    print(tfprocess.manager.checkpoints)
-    tfprocess.checkpoint.restore(tfprocess.manager.checkpoints[-1])
-    backup = tfprocess.read_weights()
-    for (swa, w) in zip(tfprocess.swa_weights, tfprocess.model.weights):
-        w.assign(swa.read_value())
-    tfprocess.model.save("/home/admin/tf_saved_models/20b_00_saved_model_2M")
-    for (old, w) in zip(backup, tfprocess.model.weights):
-        w.assign(old)
-
     train_parser.shutdown()
     test_parser.shutdown()
 

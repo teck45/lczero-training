@@ -34,4 +34,13 @@ training:
 model:
   filters: 64
   residual_blocks: 6
+  policy: 'attention'                  # attention policy fields:
+  policy_embedding_size: 64            # embedding vector size
+  encoder_layers: 1                    # number of intermediate attention layers in the policy head
+  encoder_heads: 2                     # number of attention heads in encoder layers
+  encoder_d_model: 64                  # size of the Q, K, & V vectors in encoder layers -- divisible by encoder_heads
+  encoder_dff: 128                     # size of the largest dense layer in encoder layer ffn
+  policy_d_model: 128                  # size of the query and key vectors in final attention layer
+  value: 'wdl'
+  moves_left: 'v1'
 ...
