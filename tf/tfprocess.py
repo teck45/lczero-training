@@ -1244,13 +1244,13 @@ class TFProcess:
             promotion_keys = keys[:, -8:, :]
             # queen, rook, bishop, knight order
             promotion_offsets = tf.keras.layers.Dense(4, kernel_initializer='glorot_normal',
-                                                      kernel_regularizer=self.l2reg, name='policy/ppo',
+                                                      kernel_regularizer=self.l2reg, name='policy/attention/ppo',
                                                       use_bias=False)(promotion_keys)
             promotion_offsets = tf.transpose(promotion_offsets, perm=[0, 2, 1]) * dk  # Bx4x8
             # knight offset is added to the other three
             promotion_offsets = promotion_offsets[:, :3, :] + promotion_offsets[:, 3:4, :]
 
-            # POLICY SELF-ATTENTION: self-attention weights are interpreted as from-to policy
+            # POLICY SELF-ATTENTION: self-attention weights are interpreted as from->to policy
             matmul_qk = tf.matmul(queries, keys, transpose_b=True)  # Bx64x64 (from 64 queries, 64 keys)
 
             # q, r, and b promotions are offset from the default promotion logit (knight)
@@ -1263,7 +1263,7 @@ class TFProcess:
 
             # scale the logits by dividing them by sqrt(d_model) to stabilize gradients
             promotion_logits = promotion_logits / dk  # Bx8x24 (8 from-squares, 3x8 promotions)
-            policy_attn_logits = matmul_qk / dk       # Bx64x64
+            policy_attn_logits = matmul_qk / dk       # Bx64x64 (64 from-squares, 64 to-squares)
 
             # APPLY POLICY MAP -- output becomes Bx1856
             h_fc1 = ApplyAttentionPolicyMap(dtype=self.model_dtype)(policy_attn_logits, promotion_logits)
