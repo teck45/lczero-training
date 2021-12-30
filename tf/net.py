@@ -414,8 +414,11 @@ class Net:
                     "Don't know where to store weight in protobuf: {}".format(
                         name))
 
-            if block == None:
-                pb_weights = self.pb.weights
+            if block is None:
+                if policy_residual_index is None:
+                    pb_weights = self.pb.weights
+                else:
+                    pb_weights = self.pb.weights.encoderlayer[policy_residual_index]
             else:
                 pb_weights = self.pb.weights.residual[block]
 
@@ -558,8 +561,14 @@ class Net:
                     "Don't know where to store weight in protobuf: {}".format(
                         name))
 
-            if block == None:
-                pb_weights = self.pb.weights
+            if block is None:
+                if policy_residual_index is None:
+                    pb_weights = self.pb.weights
+                else:
+                    assert policy_residual_index >= 0
+                    while policy_residual_index >= len(self.pb.weights.encoderlayer):
+                        self.pb.weights.encoderlayer.add()
+                    pb_weights = self.pb.weights.encoderlayer[policy_residual_index]
             else:
                 assert block >= 0
                 while block >= len(self.pb.weights.residual):
