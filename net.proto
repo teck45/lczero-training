@@ -85,11 +85,11 @@ message Weights {
 
   message EncoderLayer {
     optional MHA mha = 1;
-    optional Layer ln1_gamma = 2;
-    optional Layer ln1_beta = 3;
+    optional Layer ln1_gammas = 2;
+    optional Layer ln1_betas = 3;
     optional FFN ffn = 4;
-    optional Layer ln2_gamma = 5;
-    optional Layer ln2_beta = 6;
+    optional Layer ln2_gammas = 5;
+    optional Layer ln2_betas = 6;
   }
 
   // Input convnet.

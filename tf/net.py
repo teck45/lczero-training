@@ -274,11 +274,59 @@ class Net:
 
             return d[w].format(n)
 
-        def policy_to_bp(w):
+        def conv_policy_to_bp(w):
             w = w.split(':')[0]
             d = {'kernel': 'ip_pol_w', 'bias': 'ip_pol_b'}
 
             return d[w]
+
+        def attn_pol_to_bp(l, w):
+            if l == 'wq':
+                n = 2
+            elif l == 'wk':
+                n = 3
+            elif l == 'ppo':
+                n = 4
+            else:
+                raise ValueError(
+                    'Unable to decode attn_policy weight {}/{}'.format(l, w))
+            w = w.split(':')[0]
+            d = {'kernel': 'ip{}_mov_w', 'bias': 'ip{}_mov_b'}
+
+            return d[w].format(n)
+
+        def encoder_to_bp(l, w):
+            if l == 'ln1':
+                n = 1
+            elif l == 'ln2':
+                n = 2
+            else:
+                raise ValueError(
+                    'Unable to decode encoder weight {}/{}'.format(l, w))
+            w = w.split(':')[0]
+            d = {'gammas': 'ln{}_gammas', 'betas': 'ln{}_betas'}
+
+            return d[w].format(n)
+
+        def mha_to_bp(l, w):
+            s = ''
+            if l.startswith('dense'):
+                s = 'dense'
+            elif l.startswith('w'):
+                s = l[1]
+            else:
+                raise ValueError(
+                    'Unable to decode mha weight {}/{}'.format(l, w))
+            w = w.split(':')[0]
+            d = {'kernel': '{}_w', 'bias': '{}_b'}
+
+            return d[w].format(s)
+
+        def ffn_to_bp(l, w):
+            w = w.split(':')[0]
+            d = {'kernel': '{}_w', 'bias': '{}_b'}
+
+            return d[w].format(l)
 
         def moves_left_to_bp(l, w):
             if l == 'dense1':
@@ -298,6 +346,7 @@ class Net:
         weights_name = layers[-1]
         pb_name = None
         block = None
+        policy_residual_index = None
 
         if base_layer == 'input':
             pb_name = 'input.' + convblock_to_bp(weights_name)
@@ -305,7 +354,22 @@ class Net:
             pb_name = 'policy1.' + convblock_to_bp(weights_name)
         elif base_layer == 'policy':
             if 'dense' in layers[1]:
-                pb_name = policy_to_bp(weights_name)
+                pb_name = conv_policy_to_bp(weights_name)
+            elif layers[1] == 'embedding':
+                if layers[2] == 'kernel':
+                    pb_name = 'ip_pol_w'
+                else:
+                    pb_name = 'ip_pol_b'
+            elif layers[1] == 'attention':
+                pb_name = attn_pol_to_bp(layers[2], weights_name)
+            elif layers[1].startswith('enc_layer_'):
+                policy_residual_index = int(layers[1].split('_')[2]) - 1
+                if layers[2] == 'mha':
+                    pb_name = 'mha.' + mha_to_bp(layers[3], weights_name)
+                elif layers[2] == 'ffn':
+                    pb_name = 'ffn.' + ffn_to_bp(layers[3], weights_name)
+                else:
+                    pb_name = encoder_to_bp(layers[2], weights_name)
             else:
                 pb_name = 'policy.' + convblock_to_bp(weights_name)
         elif base_layer == 'value':
@@ -327,7 +391,7 @@ class Net:
             elif layers[1] == 'se':
                 pb_name = 'se.' + se_to_bp(layers[-2], weights_name)
 
-        return (pb_name, block)
+        return (pb_name, block, policy_residual_index)
 
     def get_weights_v2(self, names):
         # `names` is a list of Tensorflow tensor names to get from the protobuf.
@@ -343,7 +407,7 @@ class Net:
                 # Renorm variables are not populated.
                 continue
 
-            pb_name, block = self.tf_name_to_pb_name(name)
+            pb_name, block, policy_residual_index = self.tf_name_to_pb_name(name)
 
             if pb_name is None:
                 raise ValueError(
@@ -487,7 +551,7 @@ class Net:
                 # 50 move rule is the 110th input, or 109 starting from 0.
                 weights[:, 109, :, :] /= 99
 
-            pb_name, block = self.tf_name_to_pb_name(name)
+            pb_name, block, policy_residual_index = self.tf_name_to_pb_name(name)
 
             if pb_name is None:
                 raise ValueError(
