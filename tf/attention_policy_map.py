@@ -86,8 +86,8 @@ def make_map():
             if putdown_index >= 64:
                 pickup_file = pickup_index % 8
                 promotion_file = putdown_index % 8
-                promotion_row = (putdown_index // 8) - 8
-                z[4096 + pickup_file*24 + (promotion_file*3+promotion_row), i] = 1
+                promotion_rank = (putdown_index // 8) - 8
+                z[4096 + pickup_file*24 + (promotion_file*3+promotion_rank), i] = 1
                 i += ls[j]
                 j += 1
 
