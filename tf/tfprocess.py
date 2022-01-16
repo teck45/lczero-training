@@ -117,12 +117,12 @@ class TFProcess:
         self.RESIDUAL_BLOCKS = self.cfg['model']['residual_blocks']
         self.SE_ratio = self.cfg['model']['se_ratio']
         self.policy_channels = self.cfg['model'].get('policy_channels', 32)
-        self.policy_embedding_size = self.cfg['model'].get('emb_size_pol', self.RESIDUAL_FILTERS)
-        self.encoder_layers = self.cfg['model'].get('enc_layers_pol', 0)
-        self.encoder_heads = self.cfg['model'].get('n_heads_pol_enc', 2)
-        self.encoder_d_model = self.cfg['model'].get('d_model_pol_enc', self.RESIDUAL_FILTERS)
-        self.encoder_dff = self.cfg['model'].get('dff_pol_enc', (self.RESIDUAL_FILTERS*1.5)//1)
-        self.policy_d_model = self.cfg['model'].get('d_model_pol_hd', self.RESIDUAL_FILTERS*2)
+        self.policy_embedding_size = self.cfg['model'].get('policy_embedding_size', self.RESIDUAL_FILTERS)
+        self.encoder_layers = self.cfg['model'].get('encoder_layers', 0)
+        self.encoder_heads = self.cfg['model'].get('encoder_heads', 2)
+        self.encoder_d_model = self.cfg['model'].get('encoder_d_model', self.RESIDUAL_FILTERS)
+        self.encoder_dff = self.cfg['model'].get('encoder_dff', (self.RESIDUAL_FILTERS*1.5)//1)
+        self.policy_d_model = self.cfg['model'].get('policy_d_model', self.RESIDUAL_FILTERS*2)
         precision = self.cfg['training'].get('precision', 'single')
         loss_scale = self.cfg['training'].get('loss_scale', 128)
         self.virtual_batch_size = self.cfg['model'].get(
@@ -1118,7 +1118,6 @@ class TFProcess:
         return tf.keras.layers.Activation('relu')(tf.keras.layers.add(
             [inputs, out2]))
 
-
     @staticmethod
     def split_heads(inputs, batch_size, num_heads, depth):
         if num_heads < 2:
@@ -1150,15 +1149,14 @@ class TFProcess:
         q = self.split_heads(q, batch_size, num_heads, depth)
         k = self.split_heads(k, batch_size, num_heads, depth)
         v = self.split_heads(v, batch_size, num_heads, depth)
-        # compute multi-head self-attention between all 64 squares on the board
-        scaled_attention = self.scaled_dot_product_attention(q, k, v)
+        scaled_attention, attention_weights = self.scaled_dot_product_attention(q, k, v)
         if num_heads > 1:
             scaled_attention = tf.transpose(scaled_attention, perm=[0, 2, 1, 3])
             scaled_attention = tf.reshape(scaled_attention, (batch_size, -1, d_model))  # concatenate heads
         # final dense layer
         output = tf.keras.layers.Dense(emb_size, kernel_initializer='glorot_normal', kernel_regularizer=self.l2reg,
                                        name=name + "/dense")(scaled_attention)
-        return output
+        return output, attention_weights
 
     # 2-layer feed-forward network in encoder layers
     def ffn(self, inputs, emb_size, dff, name):
@@ -1168,15 +1166,14 @@ class TFProcess:
                                      name=name + "/dense2")(dense1)
 
     def encoder_layer(self, inputs, emb_size, d_model, num_heads, dff, name):
-        # multi-head attention
-        mha_output = self.mha(inputs, emb_size, d_model, num_heads, name=name + "/mha")
+        attn_output, attn_wts = self.mha(inputs, emb_size, d_model, num_heads, name=name + "/mha")
         # skip connection
         out1 = tf.keras.layers.LayerNormalization(epsilon=1e-6, name=name + "/ln1")(inputs + mha_output)
         # feed-forward network
         ffn_output = self.ffn(out1, emb_size, dff, name=name + "/ffn")
         # skip connection
         out2 = tf.keras.layers.LayerNormalization(epsilon=1e-6, name=name + "/ln2")(out1 + ffn_output)
-        return out2
+        return out2, attn_wts
 
     def construct_net(self, inputs):
         flow = self.conv_block(inputs,
@@ -1228,10 +1225,12 @@ class TFProcess:
                                            name='policy/embedding')(tokens)
 
             # ENCODER LAYERS: intermediate layers of self-attention
+            attn_wts = []
             for i in range(self.encoder_layers):
-                tokens = self.encoder_layer(tokens,
-                                            self.policy_embedding_size, self.encoder_heads, self.encoder_d_model,
-                                            self.encoder_dff, name='policy/enc_layer_{}'.format(i + 1))
+                tokens, attn_wts_l = self.encoder_layer(tokens, self.policy_embedding_size, self.encoder_d_model,
+                                                        self.encoder_heads, self.encoder_dff,
+                                                        name='policy/enc_layer_{}'.format(i + 1))
+                attn_wts.append(attn_wts_l)
 
             # create queries and keys for policy self-attention
             queries = tf.keras.layers.Dense(self.policy_d_model, kernel_initializer='glorot_normal',
@@ -1317,7 +1316,13 @@ class TFProcess:
         else:
             h_fc5 = None
 
-        if self.moves_left:
+        # attention weights added as optional output for analysis -- ignored by backend
+        if self.POLICY_HEAD == pb.NetworkFormat.POLICY_ATTENTION:
+            if self.moves_left:
+                outputs = [h_fc1, h_fc3, h_fc5, attn_wts]
+            else:
+                outputs = [h_fc1, h_fc3, attn_wts]
+        elif self.moves_left:
             outputs = [h_fc1, h_fc3, h_fc5]
         else:
             outputs = [h_fc1, h_fc3]

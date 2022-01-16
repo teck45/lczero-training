@@ -291,7 +291,7 @@ class Net:
                 raise ValueError(
                     'Unable to decode attn_policy weight {}/{}'.format(l, w))
             w = w.split(':')[0]
-            d = {'kernel': 'ip{}_mov_w', 'bias': 'ip{}_mov_b'}
+            d = {'kernel': 'ip{}_pol_w', 'bias': 'ip{}_pol_b'}
 
             return d[w].format(n)
 
@@ -304,7 +304,7 @@ class Net:
                 raise ValueError(
                     'Unable to decode encoder weight {}/{}'.format(l, w))
             w = w.split(':')[0]
-            d = {'gammas': 'ln{}_gammas', 'betas': 'ln{}_betas'}
+            d = {'gamma': 'ln{}_gammas', 'beta': 'ln{}_betas'}
 
             return d[w].format(n)
 
@@ -356,7 +356,7 @@ class Net:
             if 'dense' in layers[1]:
                 pb_name = conv_policy_to_bp(weights_name)
             elif layers[1] == 'embedding':
-                if layers[2] == 'kernel':
+                if layers[2].split(':')[0] == 'kernel':
                     pb_name = 'ip_pol_w'
                 else:
                     pb_name = 'ip_pol_b'
