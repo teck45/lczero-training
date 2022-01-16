@@ -122,7 +122,7 @@ class TFProcess:
         self.encoder_heads = self.cfg['model'].get('encoder_heads', 2)
         self.encoder_d_model = self.cfg['model'].get('encoder_d_model', self.RESIDUAL_FILTERS)
         self.encoder_dff = self.cfg['model'].get('encoder_dff', (self.RESIDUAL_FILTERS*1.5)//1)
-        self.policy_d_model = self.cfg['model'].get('policy_d_model', self.RESIDUAL_FILTERS*2)
+        self.policy_d_model = self.cfg['model'].get('policy_d_model', self.RESIDUAL_FILTERS)
         precision = self.cfg['training'].get('precision', 'single')
         loss_scale = self.cfg['training'].get('loss_scale', 128)
         self.virtual_batch_size = self.cfg['model'].get(
@@ -154,6 +154,8 @@ class TFProcess:
             self.POLICY_HEAD = pb.NetworkFormat.POLICY_CONVOLUTION
         elif policy_head == "attention":
             self.POLICY_HEAD = pb.NetworkFormat.POLICY_ATTENTION
+            if self.encoder_layers > 0:
+                self.net.set_headcount(self.encoder_heads)
         else:
             raise ValueError(
                 "Unknown policy head format: {}".format(policy_head))
@@ -1131,7 +1133,7 @@ class TFProcess:
         scaled_attention_logits = matmul_qk / tf.math.sqrt(dk)
         attention_weights = tf.nn.softmax(scaled_attention_logits, axis=-1)
         output = tf.matmul(attention_weights, v)
-        return output
+        return output, scaled_attention_logits
 
     # multi-head attention in encoder layers
     def mha(self, inputs, emb_size, d_model, num_heads, name):
@@ -1168,7 +1170,7 @@ class TFProcess:
     def encoder_layer(self, inputs, emb_size, d_model, num_heads, dff, name):
         attn_output, attn_wts = self.mha(inputs, emb_size, d_model, num_heads, name=name + "/mha")
         # skip connection
-        out1 = tf.keras.layers.LayerNormalization(epsilon=1e-6, name=name + "/ln1")(inputs + mha_output)
+        out1 = tf.keras.layers.LayerNormalization(epsilon=1e-6, name=name + "/ln1")(inputs + attn_output)
         # feed-forward network
         ffn_output = self.ffn(out1, emb_size, dff, name=name + "/ffn")
         # skip connection

@@ -56,6 +56,9 @@ class Net:
     def set_policyformat(self, policy):
         self.pb.format.network_format.policy = policy
 
+    def set_headcount(self, headcount):
+        self.pb.weights.headcount = headcount
+
     def set_valueformat(self, value):
         self.pb.format.network_format.value = value
 
@@ -144,15 +147,6 @@ class Net:
         self.fill_layer(se_unit.w2, weights)
         self.fill_layer(se_unit.b1, weights)
         self.fill_layer(se_unit.w1, weights)
-
-    def fill_mha(self, mha, weights):
-        pass
-
-    def fill_ffn(self, ffn, weights):
-        pass
-
-    def fill_encoder_layer(self, encoderlayer, weights, gammas):
-        pass
 
     def denorm_layer_v2(self, layer):
         """Denormalize a layer from protobuf"""
@@ -405,6 +399,9 @@ class Net:
                 name = name.replace('stddev', 'variance')
             if 'renorm' in name:
                 # Renorm variables are not populated.
+                continue
+            if 'headcount' in tf_name:
+                # headcount is set with set_headcount()
                 continue
 
             pb_name, block, encoder_block = self.tf_name_to_pb_name(name)
