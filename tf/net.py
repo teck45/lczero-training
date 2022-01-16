@@ -346,7 +346,7 @@ class Net:
         weights_name = layers[-1]
         pb_name = None
         block = None
-        policy_residual_index = None
+        encoder_block = None
 
         if base_layer == 'input':
             pb_name = 'input.' + convblock_to_bp(weights_name)
@@ -363,7 +363,7 @@ class Net:
             elif layers[1] == 'attention':
                 pb_name = attn_pol_to_bp(layers[2], weights_name)
             elif layers[1].startswith('enc_layer_'):
-                policy_residual_index = int(layers[1].split('_')[2]) - 1
+                encoder_block = int(layers[1].split('_')[2]) - 1
                 if layers[2] == 'mha':
                     pb_name = 'mha.' + mha_to_bp(layers[3], weights_name)
                 elif layers[2] == 'ffn':
@@ -391,7 +391,7 @@ class Net:
             elif layers[1] == 'se':
                 pb_name = 'se.' + se_to_bp(layers[-2], weights_name)
 
-        return (pb_name, block, policy_residual_index)
+        return (pb_name, block, encoder_block)
 
     def get_weights_v2(self, names):
         # `names` is a list of Tensorflow tensor names to get from the protobuf.
@@ -407,7 +407,7 @@ class Net:
                 # Renorm variables are not populated.
                 continue
 
-            pb_name, block, policy_residual_index = self.tf_name_to_pb_name(name)
+            pb_name, block, encoder_block = self.tf_name_to_pb_name(name)
 
             if pb_name is None:
                 raise ValueError(
@@ -415,10 +415,10 @@ class Net:
                         name))
 
             if block is None:
-                if policy_residual_index is None:
+                if encoder_block is None:
                     pb_weights = self.pb.weights
                 else:
-                    pb_weights = self.pb.weights.encoderlayer[policy_residual_index]
+                    pb_weights = self.pb.weights.encoder[encoder_block]
             else:
                 pb_weights = self.pb.weights.residual[block]
 
@@ -554,7 +554,7 @@ class Net:
                 # 50 move rule is the 110th input, or 109 starting from 0.
                 weights[:, 109, :, :] /= 99
 
-            pb_name, block, policy_residual_index = self.tf_name_to_pb_name(name)
+            pb_name, block, encoder_block = self.tf_name_to_pb_name(name)
 
             if pb_name is None:
                 raise ValueError(
@@ -562,13 +562,13 @@ class Net:
                         name))
 
             if block is None:
-                if policy_residual_index is None:
+                if encoder_block is None:
                     pb_weights = self.pb.weights
                 else:
-                    assert policy_residual_index >= 0
-                    while policy_residual_index >= len(self.pb.weights.encoderlayer):
-                        self.pb.weights.encoderlayer.add()
-                    pb_weights = self.pb.weights.encoderlayer[policy_residual_index]
+                    assert encoder_block >= 0
+                    while encoder_block >= len(self.pb.weights.encoder):
+                        self.pb.weights.encoder.add()
+                    pb_weights = self.pb.weights.encoder[encoder_block]
             else:
                 assert block >= 0
                 while block >= len(self.pb.weights.residual):

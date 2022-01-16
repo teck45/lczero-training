@@ -111,7 +111,7 @@ message Weights {
   optional Layer ip4_pol_w = 22;  // "ppo" in policy attention
   optional Layer ip4_pol_b = 23;
   // Policy encoder stack
-  repeated EncoderLayer encoder_pol = 21;
+  repeated EncoderLayer encoder = 21;
 
   // Value head
   optional ConvBlock value = 6;
