@@ -21,6 +21,10 @@ import numpy as np
 import os
 import random
 import tensorflow as tf
+import tensorflow_addons as tfa
+from tensorflow_addons.optimizers.weight_decay_optimizers import (
+    extend_with_decoupled_weight_decay,
+)
 import time
 import bisect
 import lc0_az_policy_map
@@ -30,6 +34,7 @@ from functools import reduce
 import operator
 
 from net import Net
+#from nadamw import NadamW
 
 
 class ApplySqueezeExcitation(tf.keras.layers.Layer):
@@ -133,9 +138,12 @@ class TFProcess:
         self.dropout_rate = self.cfg['model'].get('dropout_rate', 0.0)
         precision = self.cfg['training'].get('precision', 'single')
         loss_scale = self.cfg['training'].get('loss_scale', 128)
+        self.weight_decay = self.cfg['training'].get('weight_decay', 0.0)  #added as part of Nadam needs added pr, code is near line 317
+        self.beta_1 = self.cfg['training'].get('beta_1', 0.9)     #Nadam beta1 default is 0.9
+        self.beta_2 = self.cfg['training'].get('beta_2', 0.999)   #Nadam beta2 default is 0.999
+        self.epsilon = self.cfg['training'].get('epsilon', 1e-07) #Nadam epsilon value
         self.virtual_batch_size = self.cfg['model'].get(
             'virtual_batch_size', None)
-
         self.POS_ENC = apm.make_pos_enc()
 
         if precision == 'single':
@@ -247,6 +255,15 @@ class TFProcess:
                 tf.config.experimental.set_memory_growth(gpu, True)
             self.strategy = tf.distribute.MirroredStrategy()
             tf.distribute.experimental_set_strategy(self.strategy)
+        elif "," in str(self.cfg['gpu']):
+            active_gpus=[]
+            gpus = tf.config.experimental.list_physical_devices('GPU')
+            for gpu in gpus:
+                tf.config.experimental.set_memory_growth(gpu, True)
+            for i in self.cfg['gpu'].split(","):
+                active_gpus.append("GPU:" + i)
+            self.strategy = tf.distribute.MirroredStrategy(active_gpus)
+            tf.distribute.experimental_set_strategy(self.strategy)
         else:
             gpus = tf.config.experimental.list_physical_devices('GPU')
             print(gpus)
@@ -311,8 +328,18 @@ class TFProcess:
         if self.loss_scale != 1:
             self.optimizer = tf.keras.mixed_precision.experimental.LossScaleOptimizer(
                 self.optimizer, self.loss_scale)
+        #if self.cfg['training'].get('lookahead_optimizer'):
+            #import tensorflow_addons as tfa
+            #self.optimizer = tfa.optimizers.Lookahead(self.optimizer)
+        if self.cfg['training'].get('rmsprop_optimizer'):
+            self.optimizer = tf.keras.optimizers.RMSprop(learning_rate=lambda: self.active_lr, rho=0.9, momentum=0.0, epsilon=1e-07, centered=True)
+        if self.cfg['training'].get('Nadam_optimizer'):
+            self.optimizer = tf.keras.optimizers.Nadam(learning_rate=lambda: self.active_lr, beta_1=self.beta_1, beta_2=self.beta_2, epsilon=self.epsilon)
+            if self.weight_decay > 0:
+                print("using DecoupledWeightDecayExtension")
+                MyNadamW = extend_with_decoupled_weight_decay(tf.keras.optimizers.Nadam)
+                self.optimizer = MyNadamW(weight_decay=self.weight_decay, learning_rate=lambda: self.active_lr, beta_1=self.beta_1, beta_2=self.beta_2, epsilon=self.epsilon)
         if self.cfg['training'].get('lookahead_optimizer'):
-            import tensorflow_addons as tfa
             self.optimizer = tfa.optimizers.Lookahead(self.optimizer)
 
         def correct_policy(target, output):
@@ -520,13 +547,14 @@ class TFProcess:
             keep_checkpoint_every_n_hours=24,
             checkpoint_name=self.cfg['name'])
 
-    def replace_weights(self, proto_filename, ignore_errors=False):
+    def replace_weights(self, proto_filename, ignore_errors=True):
         self.net.parse_proto(proto_filename)
-
+# ignore_errors=True from default False, hack to generate model by teck45
         filters, blocks = self.net.filters(), self.net.blocks()
         if not ignore_errors:
-            if self.RESIDUAL_FILTERS != filters:
-                raise ValueError("Number of filters doesn't match the network")
+# commented by teck45 as a hack to generate model from net
+#            if self.RESIDUAL_FILTERS != filters:
+#                raise ValueError("Number of filters doesn't match the network")
             if self.RESIDUAL_BLOCKS != blocks:
                 raise ValueError("Number of blocks doesn't match the network")
             if self.POLICY_HEAD != self.net.pb.format.network_format.policy:
@@ -885,7 +913,8 @@ class TFProcess:
             w.assign(swa.read_value())
         true_test_writer, self.test_writer = self.test_writer, self.swa_writer
         print('swa', end=' ')
-        self.calculate_test_summaries(test_batches, steps)
+        swa_true = True
+        self.calculate_test_summaries(test_batches, steps, swa_true)
         self.test_writer = true_test_writer
         for (old, w) in zip(backup, self.model.weights):
             w.assign(old)
@@ -937,7 +966,7 @@ class TFProcess:
         ]
         return metrics
 
-    def calculate_test_summaries(self, test_batches, steps):
+    def calculate_test_summaries(self, test_batches, steps, swa_true=False):
         for metric in self.test_metrics:
             metric.reset()
         for _ in range(0, test_batches):
@@ -961,13 +990,20 @@ class TFProcess:
             for w in self.model.weights:
                 tf.summary.histogram(w.name, w, step=steps)
         self.test_writer.flush()
-
+        test_log_line = ""
         print("step {},".format(steps), end='')
         for metric in self.test_metrics:
             print(" {}={:g}{}".format(metric.short_name, metric.get(),
                                       metric.suffix),
                   end='')
+            test_log_line = test_log_line + " {}={:g}{}".format(metric.short_name, metric.get(),  metric.suffix)  # str(metric.short_name) + str(metric.get()) + str (metric.suffix)
         print()
+        test_log_file = "no_swa_last_net_stat.txt"
+        if swa_true == True:
+            test_log_file = "swa_last_net_stat.txt"
+        fout = open(test_log_file, "w+")
+        fout.write(test_log_line)
+        fout.close()
 
     def calculate_swa_validations(self, steps):
         backup = self.read_weights()
@@ -996,14 +1032,12 @@ class TFProcess:
             for metric in self.test_metrics:
                 tf.summary.scalar(metric.long_name, metric.get(), step=steps)
         self.validation_writer.flush()
-
         print("step {}, validation:".format(steps), end='')
         for metric in self.test_metrics:
             print(" {}={:g}{}".format(metric.short_name, metric.get(),
                                       metric.suffix),
                   end='')
         print()
-
     @tf.function()
     def compute_update_ratio(self, before_weights, after_weights, steps):
         """Compute the ratio of gradient norm to weight norm.
