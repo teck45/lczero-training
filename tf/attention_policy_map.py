@@ -117,6 +117,5 @@ def get_up_down(moves):
     out = tf.reshape(out, [-1, 64, 64])
     pu = set_zero_sum(tf.reduce_sum(out, axis=-1))
     pd = set_zero_sum(tf.reduce_sum(out, axis=-2))
-    print(pu.shape, pd.shape)
     return pu, pd
 
