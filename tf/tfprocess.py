@@ -192,6 +192,9 @@ class TFProcess:
             "virtual_batch_size", None)
         self.optimizer_name = self.cfg["training"].get(
             "optimizer", "sgd").lower()
+            
+        self.return_attn_wts = self.cfg["model"].get(
+            "return_attn_wts", False)
 
         self.soft_policy_temperature = self.cfg["model"].get(
             "soft_policy_temperature", 1.0)
@@ -1972,8 +1975,10 @@ class TFProcess:
             "value_st_err": value_st_err,
             "value_st_cat": value_st_cat,
             "moves_left": moves_left,
-            "attn_wts": attn_wts,
         }
+        if self.return_attn_wts:
+            outputs["attn_wts"] = attn_wts
+
         # Tensorflow does not accept None values in the output dictionary
         none_keys = []
         for key in outputs:
