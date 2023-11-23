@@ -69,12 +69,16 @@ import gzip
 from time import time, sleep
 from select import select
 
+V7B_VERSION = struct.pack("i", 170)
+n_future = 2
+
 V7_VERSION = struct.pack("i", 7)
 V6_VERSION = struct.pack("i", 6)
 V5_VERSION = struct.pack("i", 5)
 CLASSICAL_INPUT = struct.pack("i", 1)
 V4_VERSION = struct.pack("i", 4)
 V3_VERSION = struct.pack("i", 3)
+V7B_STRUCT_STRING = "4si7432s832sBBBBBBBbfffffffffffffffIHHfffHHffffffff" + "7432s" * n_future
 V7_STRUCT_STRING = "4si7432s832sBBBBBBBbfffffffffffffffIHHfffHHffffffff"
 V6_STRUCT_STRING = "4si7432s832sBBBBBBBbfffffffffffffffIHHff"
 V5_STRUCT_STRING = "4si7432s832sBBBBBBBbfffffff"
@@ -245,12 +249,191 @@ class ChunkParserInner:
         struct.Struct doesn"t pickle, so it needs to be separately
         constructed in workers.
         """
+        self.v7b_struct = struct.Struct(V7B_STRUCT_STRING)
         self.v7_struct = struct.Struct(V7_STRUCT_STRING)
         assert self.v7_struct.size == 8396
         self.v6_struct = struct.Struct(V6_STRUCT_STRING)
         self.v5_struct = struct.Struct(V5_STRUCT_STRING)
         self.v4_struct = struct.Struct(V4_STRUCT_STRING)
         self.v3_struct = struct.Struct(V3_STRUCT_STRING)
+
+
+    def convert_v7b_to_tuple(self, content):
+        """
+        Unpack a v6 binary record to 5-tuple (state, policy pi, result, q, m)
+
+        v6 struct format is (8356 bytes total):
+                                  size         1st byte index
+        uint32_t version;                               0
+        uint32_t input_format;                          4
+        float probabilities[1858];  7432 bytes          8
+        uint64_t planes[104];        832 bytes       7440
+        uint8_t castling_us_ooo;                     8272
+        uint8_t castling_us_oo;                      8273
+        uint8_t castling_them_ooo;                   8274
+        uint8_t castling_them_oo;                    8275
+        uint8_t side_to_move_or_enpassant;           8276
+        uint8_t rule50_count;                        8277
+        // Bitfield with the following allocation:
+        //  bit 7: side to move (input type 3)
+        //  bit 6: position marked for deletion by the rescorer (never set by lc0)
+        //  bit 5: game adjudicated (v6)
+        //  bit 4: max game length exceeded (v6)
+        //  bit 3: best_q is for proven best move (v6)
+        //  bit 2: transpose transform (input type 3)
+        //  bit 1: mirror transform (input type 3)
+        //  bit 0: flip transform (input type 3)
+        uint8_t invariance_info;                     8278
+        uint8_t dep_result;                               8279
+        float root_q;                                8280
+        float best_q;                                8284
+        float root_d;                                8288
+        float best_d;                                8292
+        float root_m;      // In plies.              8296
+        float best_m;      // In plies.              8300
+        float plies_left;                            8304
+        float result_q;                              8308
+        float result_d;                              8312
+        float played_q;                              8316
+        float played_d;                              8320
+        float played_m;                              8324
+        // The folowing may be NaN if not found in cache.
+        float orig_q;      // For value repair.      8328
+        float orig_d;                                8332
+        float orig_m;                                8336
+        uint32_t visits;                             8340
+        // Indices in the probabilities array.
+        uint16_t played_idx;                         8344
+        uint16_t best_idx;                           8346
+        float pol_kld;                               8348
+        float q_st;                                  8352
+        float d_st;                                  8356
+        uint16_t opp_played_idx;                     8360
+        uint16_t next_played_idx;                    8362
+        float extra[8]                               8364
+        ...                                          8396
+        """
+        # unpack the V6 content from raw byte array, arbitrarily chose 4 2-byte values
+        # for the 8 "reserved" bytes
+        (ver, input_format, probs, planes, us_ooo, us_oo, them_ooo, them_oo,
+         stm, rule50_count, invariance_info, dep_result, root_q, best_q,
+         root_d, best_d, root_m, best_m, plies_left, result_q, result_d,
+         played_q, played_d, played_m, orig_q, orig_d, orig_m, visits,
+         played_idx, best_idx, pol_kld, st_q, st_d, opp_played_idx, next_played_idx,
+         f1, f2, f3, f4, f5, f6, f7, f8, *future_probs) = self.v7b_struct.unpack(content)
+        """
+        v5 struct format was (8308 bytes total)
+            int32 version (4 bytes)
+            int32 input_format (4 bytes)
+            1858 float32 probabilities (7432 bytes)
+            104 (13*8) packed bit planes of 8 bytes each (832 bytes)
+            uint8 castling us_ooo (1 byte)
+            uint8 castling us_oo (1 byte)
+            uint8 castling them_ooo (1 byte)
+            uint8 castling them_oo (1 byte)
+            uint8 side_to_move (1 byte)
+            uint8 rule50_count (1 byte)
+            uint8 dep_ply_count (1 byte) (unused)
+            int8 result (1 byte)
+            float32 root_q (4 bytes)
+            float32 best_q (4 bytes)
+            float32 root_d (4 bytes)
+            float32 best_d (4 bytes)
+            float32 root_m (4 bytes)
+            float32 best_m (4 bytes)
+            float32 plies_left (4 bytes)
+        """
+        # v3/4 data sometimes has a useful value in dep_ply_count (now invariance_info),
+        # so copy that over if the new ply_count is not populated.
+        if plies_left == 0:
+            plies_left = invariance_info
+        plies_left = struct.pack("f", plies_left)
+
+        assert input_format == self.expected_input_format
+
+        # Unpack bit planes and cast to 32 bit float
+        planes = np.unpackbits(np.frombuffer(planes, dtype=np.uint8)).astype(
+            np.float32)
+        rule50_divisor = 99.0
+        if input_format > 3:
+            rule50_divisor = 100.0
+        rule50_plane = struct.pack("f", rule50_count / rule50_divisor) * 64
+
+        if input_format == 1:
+            middle_planes = self.flat_planes[us_ooo] + \
+                self.flat_planes[us_oo] + \
+                self.flat_planes[them_ooo] + \
+                self.flat_planes[them_oo] + \
+                self.flat_planes[stm]
+        elif input_format == 2:
+            # Each inner array has to be reversed as these fields are in opposite endian to the planes data.
+            them_ooo_bytes = reverse_expand_bits(them_ooo)
+            us_ooo_bytes = reverse_expand_bits(us_ooo)
+            them_oo_bytes = reverse_expand_bits(them_oo)
+            us_oo_bytes = reverse_expand_bits(us_oo)
+            middle_planes = us_ooo_bytes + (6*8*4) * b"\x00" + them_ooo_bytes + \
+                us_oo_bytes + (6*8*4) * b"\x00" + them_oo_bytes + \
+                self.flat_planes[0] + \
+                self.flat_planes[0] + \
+                self.flat_planes[stm]
+        elif input_format == 3 or input_format == 4 or input_format == 132 or input_format == 5 or input_format == 133:
+            # Each inner array has to be reversed as these fields are in opposite endian to the planes data.
+            them_ooo_bytes = reverse_expand_bits(them_ooo)
+            us_ooo_bytes = reverse_expand_bits(us_ooo)
+            them_oo_bytes = reverse_expand_bits(them_oo)
+            us_oo_bytes = reverse_expand_bits(us_oo)
+            enpassant_bytes = reverse_expand_bits(stm)
+            middle_planes = us_ooo_bytes + (6*8*4) * b"\x00" + them_ooo_bytes + \
+                us_oo_bytes + (6*8*4) * b"\x00" + them_oo_bytes + \
+                self.flat_planes[0] + \
+                self.flat_planes[0] + \
+                (7*8*4) * b"\x00" + enpassant_bytes
+
+        # Concatenate all byteplanes. Make the last plane all 1"s so the NN can
+        # detect edges of the board more easily
+        aux_plus_6_plane = self.flat_planes[0]
+        if (input_format == 132
+                or input_format == 133) and invariance_info >= 128:
+            aux_plus_6_plane = self.flat_planes[1]
+        planes = planes.tobytes() + \
+            middle_planes + \
+            rule50_plane + \
+            aux_plus_6_plane + \
+            self.flat_planes[1]
+
+        assert len(planes) == ((8 * 13 * 1 + 8 * 1 * 1) * 8 * 8 * 4)
+
+        if ver == V6_VERSION or ver == V7_VERSION:
+            winner = struct.pack("fff", 0.5 * (1.0 - result_d + result_q),
+                                 result_d, 0.5 * (1.0 - result_d - result_q))
+        else:
+            dep_result = float(dep_result)
+            assert dep_result == 1.0 or dep_result == -1.0 or dep_result == 0.0
+            winner = struct.pack("fff", dep_result == 1.0, dep_result == 0.0,
+                                 dep_result == -1.0)
+
+        def clip(x, lo, hi):
+            return min(max(x, lo), hi)
+
+        def qd_to_wdl(q, d):
+            e = 1e-2
+            assert -1.0 - e <= q <= 1.0 + e and 0.0 - e <= d <= 1.0 + e
+            q = clip(q, -1.0, 1.0)
+            d = clip(d, 0.0, 1.0)
+            w = 0.5 * (1.0 - d + q)
+            l = 0.5 * (1.0 - d - q)
+            return (w, d, l)
+
+        root_wdl = struct.pack("fff", *(qd_to_wdl(root_q, root_d)))
+
+        st_wdl = struct.pack("fff", *(qd_to_wdl(st_q, st_d)))
+
+        played_idx = struct.pack("i", played_idx)
+        opp_played_idx = struct.pack("i", opp_played_idx)
+        next_played_idx = struct.pack("i", next_played_idx)
+
+        return (planes, probs, winner, root_wdl, plies_left, st_wdl, *future_probs)
+
 
     def convert_v7_to_tuple(self, content):
         """
@@ -591,7 +774,7 @@ class ChunkParserInner:
 
     def sample_record(self, chunkdata):
         """
-        Randomly sample through the v3/4/5/6 chunk data and select records in v6 format
+        Randomly sample through the v3/4/5/6/7 chunk data and select records in v6 format
         Downsampling to avoid highly correlated positions skips most records, and
         diff focus may also skip some records.
         """
@@ -608,6 +791,10 @@ class ChunkParserInner:
             record_size = self.v3_struct.size
         else:
             return
+        
+        policies = [chunkdata[i + 8:i + 8 + 1858 * 4] for i in range(0, len(chunkdata), record_size)]
+        policies.extend(n_future * [struct.pack("f", 1.0) + struct.pack("f", -1.0) * 1857])
+        
 
         for i in range(0, len(chunkdata), record_size):
             if self.sample > 1:
@@ -646,10 +833,14 @@ class ChunkParserInner:
                     if thresh_p < 1.0 and random.random() > thresh_p:
                         continue
 
+            record += b"".join(policies[i//record_size + 1: i//record_size + 1 + n_future])
             yield record
 
     def single_file_gen(self, filename):
         try:
+
+            
+
             with gzip.open(filename, "rb") as chunk_file:
                 version = chunk_file.read(4)
                 chunk_file.seek(0)
@@ -669,12 +860,9 @@ class ChunkParserInner:
                     print("Unknown version {} in file {}".format(
                         version, filename))
                     return
-                while True:
-                    chunkdata = chunk_file.read(256 * record_size)
-                    if len(chunkdata) == 0:
-                        break
-                    for item in self.sample_record(chunkdata):
-                        yield item
+                chunkdata = chunk_file.read()
+                for item in self.sample_record(chunkdata):
+                    yield item
 
         except:
             return
@@ -709,7 +897,7 @@ class ChunkParserInner:
         Read v7 records from child workers, shuffle, and yield
         records.
         """
-        sbuff = sb.ShuffleBuffer(self.v7_struct.size, self.shuffle_size)
+        sbuff = sb.ShuffleBuffer(self.v7b_struct.size, self.shuffle_size)
         while len(self.readers):
             for r in self.readers:
                 try:
@@ -758,7 +946,7 @@ class ChunkParserInner:
         applying a random symmetry on the way.
         """
         for r in gen:
-            yield self.convert_v7_to_tuple(r)
+            yield self.convert_v7b_to_tuple(r)
 
     def batch_gen(self, gen, allow_partial=True):
         """
