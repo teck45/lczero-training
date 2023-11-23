@@ -178,6 +178,9 @@ class TFProcess:
             "policy_d_model", self.embedding_size)
         self.dropout_rate = self.cfg["model"].get("dropout_rate", 0.0)
 
+        self.n_future_boards = self.cfg["model"].get("n_future_boards", 0)
+
+
         precision = self.cfg["training"].get("precision", "single")
         loss_scale = self.cfg["training"].get("loss_scale", 128)
         # added as part of Nadam needs added pr, code is near line 317
@@ -635,7 +638,6 @@ class TFProcess:
         wdl = tf.expand_dims(tf.constant([1.0, 0.0, -1.0]), 1)
 
         def unreduced_mse_loss(target, output):
-            assert target.shape[-1] == output.shape[-1]
             scalar_z_conv = convert_val_to_scalar(output, softmax=True)
             scalar_target = convert_val_to_scalar(target, softmax=False)
             return tf.math.squared_difference(
@@ -691,6 +693,13 @@ class TFProcess:
 
         self.value_losses_fn = value_losses
 
+
+        def future_loss(target, output):
+            loss = tf.nn.softmax_cross_entropy_with_logits(labels=tf.stop_gradient(target), logits=output)
+            return tf.reduce_mean(input_tensor=loss)
+        
+        self.future_loss_fn = future_loss
+
         if self.moves_left:
 
             def moves_left_loss(target, output):
@@ -722,6 +731,7 @@ class TFProcess:
                                 "value_st_cat",
                                 "reg",
                                 "moves_left",
+                                "future",
                                 ]
         self.loss_weights = self.cfg["training"]["loss_weights"]
         for key in self.loss_weights:
@@ -780,6 +790,7 @@ class TFProcess:
             Metric("V ST Cat", "Value ST Cat Loss"),
             Metric("P Opp", "Policy Opponent Loss"),
             Metric("P Next", "Policy Next Loss"),
+            Metric("Fut", "Future Loss"),
         ]
 
         self.train_metrics.extend(accuracy_thresholded_metrics)
@@ -810,6 +821,8 @@ class TFProcess:
             Metric("V ST Cat", "Value ST Cat Loss"),
             Metric("P Opp", "Policy Opponent Loss"),
             Metric("P Next", "Policy Next Loss"),
+            Metric("Fut", "Future Loss"),
+
         ]
 
         self.test_metrics.extend(accuracy_thresholded_metrics)
@@ -993,7 +1006,7 @@ class TFProcess:
         return [w.read_value() for w in self.model.weights]
 
     @tf.function()
-    def process_inner_loop(self, x, y, z, q, m, st_q, opp_probs, next_probs):
+    def process_inner_loop(self, x, y, z, q, m, st_q, opp_probs, next_probs, fut):
 
         with tf.GradientTape() as tape:
 
@@ -1004,6 +1017,8 @@ class TFProcess:
             value_q_err = outputs.get("value_q_err")
             value_q_cat = outputs.get("value_q_cat")
             value_st = outputs.get("value_st")
+            value_st = self.convert_val_to_scalar(value_st, softmax=True)
+
             value_st_err = outputs.get("value_st_err")
             value_st_cat = outputs.get("value_st_cat")
 
@@ -1013,6 +1028,8 @@ class TFProcess:
 
             policy_opponent = outputs.get("policy_opponent")
             policy_next = outputs.get("policy_next")
+
+            future_pred = outputs.get("future")
 
             # Policy losses
             policy_loss = self.policy_loss_fn(y, policy)
@@ -1064,6 +1081,9 @@ class TFProcess:
             else:
                 moves_left_loss = tf.constant(0.)
 
+            
+            future_loss = self.future_loss_fn(fut, future_pred) if future_pred is not None else tf.constant(0.)
+
             losses = {
                 "policy": policy_loss,
                 "policy_optimistic_st": policy_optimistic_st_loss,
@@ -1078,6 +1098,7 @@ class TFProcess:
                 "value_st_err": value_st_err_loss,
                 "value_st_cat": value_st_cat_loss,
                 "moves_left": moves_left_loss,
+                "future": future_loss,
                 "reg": reg_term,
             }
 
@@ -1108,6 +1129,7 @@ class TFProcess:
                 value_st_cat_loss,
                 policy_opponent_loss,
                 policy_next_loss,
+                future_loss,
             ]
             metrics.extend(
                 [acc * 100 for acc in policy_thresholded_accuracies])
@@ -1118,9 +1140,9 @@ class TFProcess:
         return metrics, tape.gradient(total_loss, self.model.trainable_weights)
 
     @tf.function()
-    def strategy_process_inner_loop(self, x, y, z, q, m, st_q, opp_probs, next_probs):
+    def strategy_process_inner_loop(self, x, y, z, q, m, st_q, opp_probs, next_probs, fut):
         metrics, new_grads = self.strategy.run(self.process_inner_loop,
-                                               args=(x, y, z, q, m, st_q, opp_probs, next_probs))
+                                               args=(x, y, z, q, m, st_q, opp_probs, next_probs, fut))
         metrics = [
             self.strategy.reduce(tf.distribute.ReduceOp.MEAN, m, axis=None)
             for m in metrics
@@ -1171,13 +1193,13 @@ class TFProcess:
         # Run training for this batch
         grads = None
         for batch_id in range(batch_splits):
-            x, y, z, q, m, st_q, opp_probs, next_probs = next(self.train_iter)
+            x, y, z, q, m, st_q, opp_probs, next_probs, fut = next(self.train_iter)
             if self.strategy is not None:
                 metrics, new_grads = self.strategy_process_inner_loop(
-                    x, y, z, q, m, st_q, opp_probs, next_probs)
+                    x, y, z, q, m, st_q, opp_probs, next_probs, fut)
             else:
                 metrics, new_grads = self.process_inner_loop(
-                    x, y, z, q, m, st_q, opp_probs, next_probs)
+                    x, y, z, q, m, st_q, opp_probs, next_probs, fut)
             if not grads:
                 grads = new_grads
             else:
@@ -1369,7 +1391,7 @@ class TFProcess:
             w.assign(old)
 
     @tf.function()
-    def calculate_test_summaries_inner_loop(self, x, y, z, q, m, st_q, opp_probs, next_probs):
+    def calculate_test_summaries_inner_loop(self, x, y, z, q, m, st_q, opp_probs, next_probs, fut):
         outputs = self.model(x, training=False)
 
         value_winner = outputs.get("value_winner")
@@ -1378,6 +1400,8 @@ class TFProcess:
         value_q_err = outputs.get("value_q_err")
         value_q_cat = outputs.get("value_q_cat")
         value_st = outputs.get("value_st")
+        value_st = self.convert_val_to_scalar(value_st, softmax=True)
+
         value_st_err = outputs.get("value_st_err")
         value_st_cat = outputs.get("value_st_cat")
 
@@ -1387,6 +1411,8 @@ class TFProcess:
 
         policy_opponent = outputs.get("policy_opponent")
         policy_next = outputs.get("policy_next")
+
+        future_pred = outputs.get("future")
 
         # Policy losses
         policy_loss = self.policy_loss_fn(y, policy)
@@ -1440,6 +1466,8 @@ class TFProcess:
         else:
             moves_left_loss = tf.constant(0.)
 
+        future_loss = self.future_loss_fn(fut, future_pred) if future_pred is not None else tf.constant(0.)
+
         metrics = [
             policy_loss,
             policy_optimistic_st_loss,
@@ -1463,15 +1491,16 @@ class TFProcess:
             value_st_cat_loss,
             policy_opponent_loss,
             policy_next_loss,
+            future_loss,
         ]
 
         metrics.extend([acc * 100 for acc in policy_thresholded_accuracies])
         return metrics
 
     @tf.function()
-    def strategy_calculate_test_summaries_inner_loop(self, x, y, z, q, m, st_q, opp_probs, next_probs):
+    def strategy_calculate_test_summaries_inner_loop(self, x, y, z, q, m, st_q, opp_probs, next_probs, fut):
         metrics = self.strategy.run(self.calculate_test_summaries_inner_loop,
-                                    args=(x, y, z, q, m, st_q, opp_probs, next_probs))
+                                    args=(x, y, z, q, m, st_q, opp_probs, next_probs, fut))
         metrics = [
             self.strategy.reduce(tf.distribute.ReduceOp.MEAN, m, axis=None)
             for m in metrics
@@ -1482,13 +1511,13 @@ class TFProcess:
         for metric in self.test_metrics:
             metric.reset()
         for _ in range(0, test_batches):
-            x, y, z, q, m, st_q, opp_probs, next_probs = next(self.test_iter)
+            x, y, z, q, m, st_q, opp_probs, next_probs, fut = next(self.test_iter)
             if self.strategy is not None:
                 metrics = self.strategy_calculate_test_summaries_inner_loop(
-                    x, y, z, q, m, st_q, opp_probs, next_probs)
+                    x, y, z, q, m, st_q, opp_probs, next_probs, fut)
             else:
                 metrics = self.calculate_test_summaries_inner_loop(
-                    x, y, z, q, m, st_q, opp_probs, next_probs)
+                    x, y, z, q, m, st_q, opp_probs, next_probs, fut)
             for acc, val in zip(self.test_metrics, metrics):
                 acc.accumulate(val)
         self.net.pb.training_params.learning_rate = self.lr
@@ -1524,13 +1553,13 @@ class TFProcess:
     def calculate_test_validations(self, steps: int):
         for metric in self.test_metrics:
             metric.reset()
-        for (x, y, z, q, m, st_q, opp_probs, next_probs) in self.validation_dataset:
+        for (x, y, z, q, m, st_q, opp_probs, next_probs, fut) in self.validation_dataset:
             if self.strategy is not None:
                 metrics = self.strategy_calculate_test_summaries_inner_loop(
-                    x, y, z, q, m, st_q, opp_probs, next_probs)
+                    x, y, z, q, m, st_q, opp_probs, next_probs, fut)
             else:
                 metrics = self.calculate_test_summaries_inner_loop(
-                    x, y, z, q, m, st_q, opp_probs, next_probs)
+                    x, y, z, q, m, st_q, opp_probs, next_probs, fut)
             for acc, val in zip(self.test_metrics, metrics):
                 acc.accumulate(val)
         with self.validation_writer.as_default():
@@ -1937,6 +1966,17 @@ class TFProcess:
             name="value/q", wdl=self.wdl, use_err=True) if self.cfg['model'].get('value_q', False) else (None, None, None)
         value_st, value_st_err, value_st_cat = value_head(
             name="value/st", wdl=self.wdl, use_err=True) if self.cfg['model'].get('value_st', False) else (None, None, None)
+        
+
+        def future_head(name):
+            fut = tf.keras.layers.Dense(13 * self.n_future_boards,
+                                        kernel_initializer="glorot_normal",
+                                        kernel_regularizer=self.l2reg,
+                                        name=name+"/dense")(flow)
+            fut = tf.reshape(fut, [-1, 64, self.n_future_boards, 13])
+            return fut
+        
+        future = future_head(name="future") if self.cfg['model'].get('future', False) else None
 
         # Moves left head
         if self.moves_left:
@@ -1975,6 +2015,7 @@ class TFProcess:
             "value_st_err": value_st_err,
             "value_st_cat": value_st_cat,
             "moves_left": moves_left,
+            "future": future,
         }
         if self.return_attn_wts:
             outputs["attn_wts"] = attn_wts

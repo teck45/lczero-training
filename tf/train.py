@@ -202,7 +202,7 @@ def main(cmd):
     print("Creating TFProcess")
     tfprocess = TFProcess(cfg)
     print("Done")
-    output_types = 8 * (tf.string,)
+    output_types = 9 * (tf.string,)
 
     print("Initializing datasets")
     train_dataset = tf.data.Dataset.from_generator(

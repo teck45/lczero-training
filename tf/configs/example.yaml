@@ -96,6 +96,10 @@ model:
     omit_qkv_biases: true # these two increases training speed by ~10% on BT4 
     encoder_rms_norm: true # without quality degradation
 
+
+    n_future_boards: 16
+    future: true
+
     policy_optimistic_st: true
     policy_opponent: false
     policy_next: false
@@ -103,7 +107,5 @@ model:
     value_q: true
     soft_policy: true
     categorical_value_buckets: 32
-
-
 
     soft_policy_temperature: 4.0

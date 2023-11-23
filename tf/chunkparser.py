@@ -70,7 +70,8 @@ from time import time, sleep
 from select import select
 
 V7B_VERSION = struct.pack("i", 170)
-n_future = 2
+n_future_probs = 2
+n_future_boards = 16
 
 V7_VERSION = struct.pack("i", 7)
 V6_VERSION = struct.pack("i", 6)
@@ -78,7 +79,7 @@ V5_VERSION = struct.pack("i", 5)
 CLASSICAL_INPUT = struct.pack("i", 1)
 V4_VERSION = struct.pack("i", 4)
 V3_VERSION = struct.pack("i", 3)
-V7B_STRUCT_STRING = "4si7432s832sBBBBBBBbfffffffffffffffIHHfffHHffffffff" + "7432s" * n_future
+V7B_STRUCT_STRING = "4si7432s832sBBBBBBBbfffffffffffffffIHHfffHHffffffff" + "7432s" * n_future_probs + str(13 * 8 * n_future_boards) + "s"
 V7_STRUCT_STRING = "4si7432s832sBBBBBBBbfffffffffffffffIHHfffHHffffffff"
 V6_STRUCT_STRING = "4si7432s832sBBBBBBBbfffffffffffffffIHHff"
 V5_STRUCT_STRING = "4si7432s832sBBBBBBBbfffffff"
@@ -100,6 +101,18 @@ class ChunkDataSrc:
         if not self.items:
             return None
         return self.items.pop()
+    
+
+def reverse_board(planes):
+    # planes is 12 * 8 = 96 bytes
+    # The order of the squares is reversed when switching sides, so first reverse 
+    # the squares within each plane, then switch the first 6 planes (player 1 pieces) with planes 6:12 (player 2 pieces)
+    # the 13th plane is 1 for empty squares and 0 for occupied squares, so it doesn't need to be reversed
+    planes = bytearray(planes)
+    for i in range(13):
+        planes[i*8:(i+1)*8] = planes[i*8:(i+1)*8][::-1]
+    planes[:48], planes[48:96] = planes[48:96], planes[:48]
+    return planes
 
 
 def chunk_reader(chunk_filenames, chunk_filename_queue):
@@ -320,7 +333,7 @@ class ChunkParserInner:
          root_d, best_d, root_m, best_m, plies_left, result_q, result_d,
          played_q, played_d, played_m, orig_q, orig_d, orig_m, visits,
          played_idx, best_idx, pol_kld, st_q, st_d, opp_played_idx, next_played_idx,
-         f1, f2, f3, f4, f5, f6, f7, f8, *future_probs) = self.v7b_struct.unpack(content)
+         f1, f2, f3, f4, f5, f6, f7, f8, opp_probs, next_probs, fut) = self.v7b_struct.unpack(content)
         """
         v5 struct format was (8308 bytes total)
             int32 version (4 bytes)
@@ -432,7 +445,10 @@ class ChunkParserInner:
         opp_played_idx = struct.pack("i", opp_played_idx)
         next_played_idx = struct.pack("i", next_played_idx)
 
-        return (planes, probs, winner, root_wdl, plies_left, st_wdl, *future_probs)
+        fut = np.unpackbits(np.frombuffer(fut, dtype=np.uint8)).astype(
+            np.float32)
+
+        return (planes, probs, winner, root_wdl, plies_left, st_wdl, opp_probs, next_probs, fut)
 
 
     def convert_v7_to_tuple(self, content):
@@ -522,6 +538,7 @@ class ChunkParserInner:
         """
         # v3/4 data sometimes has a useful value in dep_ply_count (now invariance_info),
         # so copy that over if the new ply_count is not populated.
+
         if plies_left == 0:
             plies_left = invariance_info
         plies_left = struct.pack("f", plies_left)
@@ -792,8 +809,29 @@ class ChunkParserInner:
         else:
             return
         
-        policies = [chunkdata[i + 8:i + 8 + 1858 * 4] for i in range(0, len(chunkdata), record_size)]
-        policies.extend(n_future * [struct.pack("f", 1.0) + struct.pack("f", -1.0) * 1857])
+        n_chunks = len(chunkdata) // record_size
+        if n_chunks == 0:
+            return
+        
+        probs = [chunkdata[i + 8:i + 8 + 1858 * 4] for i in range(0, len(chunkdata), record_size)]
+        # if there is a single legal move then the loss will be 0, so pick an arbitrary move
+        probs.extend(n_future_probs * [struct.pack("f", 1.0) + struct.pack("f", -1.0) * 1857]) 
+
+
+        white_boards = b""
+        black_boards = b""
+
+        for i in range(n_chunks):
+            start = i*record_size
+            plane = chunkdata[7440:7440 + 8 * 13]
+            if i % 2 == 0: # this board is from white's perspective
+                white_boards += plane
+                black_boards += reverse_board(plane)
+            else:
+                white_boards += reverse_board(plane)
+                black_boards += plane
+        white_boards += white_boards[-8*13:] * n_future_boards # history is the final position if game over
+        black_boards += black_boards[-8*13:] * n_future_boards
         
 
         for i in range(0, len(chunkdata), record_size):
@@ -801,6 +839,8 @@ class ChunkParserInner:
                 # Downsample, using only 1/Nth of the items.
                 if random.randint(0, self.sample - 1) != 0:
                     continue  # Skip this record.
+            
+            idx = i//record_size
 
             record = chunkdata[i:i + record_size]
             # for earlier versions, append fake bytes to record to maintain size
@@ -832,15 +872,17 @@ class ChunkParserInner:
                     thresh_p = self.diff_focus_min + self.diff_focus_slope * total
                     if thresh_p < 1.0 and random.random() > thresh_p:
                         continue
+        
 
-            record += b"".join(policies[i//record_size + 1: i//record_size + 1 + n_future])
+            record += b"".join(probs[idx + 1: idx + 1 + n_future_probs])
+            boards = white_boards if idx % 2 == 0 else black_boards
+            record += boards[8 * 13 * idx:8 * 13 * (idx + n_future_boards)]
+
+
             yield record
 
     def single_file_gen(self, filename):
         try:
-
-            
-
             with gzip.open(filename, "rb") as chunk_file:
                 version = chunk_file.read(4)
                 chunk_file.seek(0)

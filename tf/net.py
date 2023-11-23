@@ -469,6 +469,16 @@ class Net:
             if 'dense' in layers[2] or 'embedding' in layers[2]:
                 pb_name = value_to_bp(layers[2], weights_name)
             pb_name = pb_prefix + pb_name
+        
+        elif base_layer == 'future':
+            pb_prefix = 'future_head.'
+            if layers[1].split(':')[0] == 'kernel':
+                pb_name = 'ip_fut_w'
+            else:
+                pb_name = 'ip_fut_b'
+            pb_name = pb_prefix + pb_name
+
+
         elif base_layer == 'moves_left':
             if 'dense' in layers[1] or 'embedding' in layers[1]:
                 pb_name = moves_left_to_bp(layers[1], weights_name)
