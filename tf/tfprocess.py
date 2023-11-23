@@ -674,7 +674,7 @@ class TFProcess:
         def value_err_loss(value_target, value, output):
             value = convert_val_to_scalar(value, softmax=True)
             value_target = convert_val_to_scalar(value_target, softmax=False)
-            true_error = tf.math.squared_difference(value_target, value)
+            true_error = tf.stop_gradient(tf.math.squared_difference(value_target, value))
             loss = tf.math.squared_difference(true_error, output)
             return tf.reduce_mean(input_tensor=loss)
 
