@@ -43,19 +43,20 @@ training:
         - 100
     loss_weights:
         policy: 1.0
-        policy_optimistic_st: 1.0
+        policy_optimistic_st: 0.1
         policy_soft: 8.0 # loss is much smaller at optimum
-        policy_opponent: 0.0 # these "future heads" are unstable and not recommended
-        policy_next: 0.0
+        policy_opponent: 0.1
+        policy_next: 0.1
         value_winner: 1.0
         value_q: 1.0
         value_q_cat: 0.1
-        value_st: 1.0 # larger because mse loss
-        value_q_err: 10.0  # both error weights should be the same
-        value_st_err: 10.0
+        value_st: 1.0 # larger becausec mse loss
+        value_q_err: 1.0  # both error weights should be the same
+        value_st_err: 1.0
         value_st_cat: 0.1
         moves_left: 1.0
         reg: 1.0
+        future: 0.1
     path: 'networks'
 
     optimizer: nadam # sgd/nadam/rmsprop/adabelief/adam
@@ -96,6 +97,11 @@ model:
     omit_qkv_biases: true # these two increases training speed by ~10% on BT4 
     encoder_rms_norm: true # without quality degradation
 
+    policy_optimism_strength: 1.0
+
+    n_future_boards: 16
+    future: true
+
     policy_optimistic_st: true
     policy_opponent: false
     policy_next: false
@@ -103,7 +109,5 @@ model:
     value_q: true
     soft_policy: true
     categorical_value_buckets: 32
-
-
 
     soft_policy_temperature: 4.0

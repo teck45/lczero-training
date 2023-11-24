@@ -127,6 +127,11 @@ message Weights {
     optional Layer ip4_pol_w = 7;  // "ppo" in policy attention
   }
 
+  message FutureHead {
+    optional Layer ip_fut_w = 1;
+    optional Layer ip_fut_b = 2;
+  }
+
   message ValueHead {
     // Value head
     optional ConvBlock value = 100;
@@ -222,6 +227,7 @@ message Weights {
 
   optional ValueHeads value_heads = 44;
   optional PolicyHeads policy_heads = 45;
+  optional FutureHead future_head = 46;
 
   // Moves left head
   optional ConvBlock moves_left = 12;
