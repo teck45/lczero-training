@@ -215,6 +215,9 @@ class TFProcess:
         self.encoder_rms_norm = self.cfg["model"].get(
             "encoder_rms_norm", False)
 
+        self.policy_optimism_strength = self.cfg["model"].get(
+            "policy_optimism_strength", 1.0)
+
         self.embedding_style = self.cfg["model"].get(
             "embedding_style", "new").lower()
 
@@ -541,8 +544,10 @@ class TFProcess:
 
         self.policy_divergence_fn = policy_divergence
 
-        def get_policy_optimism_weights(value_target, value_pred, value_err_pred, strength=2.0):
+        def get_policy_optimism_weights(value_target, value_pred, value_err_pred, strength=None):
             # value err pred already has square root taken
+            if strength is None:
+                strength = self.policy_optimism_strength
             value_pred = self.convert_val_to_scalar(value_pred)
             value_target = self.convert_val_to_scalar(value_target)
             value_err_pred = tf.math.sqrt(value_err_pred)
@@ -1784,8 +1789,8 @@ class TFProcess:
             flow = tf.keras.layers.Concatenate()([flow, pos_info])
 
             # square embedding
-            flow = tf.keras.layers.Dense(self.embedding_size, kernel_initializer="glorot_normal",
-                                         kernel_regularizer=self.l2reg, activation=self.DEFAULT_ACTIVATION,
+            flow = tf.keras.layers.Dense(self.embedding_size, kernel_initializer="glorot_normal", 
+                                        activation=self.DEFAULT_ACTIVATION,
                                          name=name+"embedding")(flow)
             flow = self.encoder_norm(
                 name=name+"embedding/ln")(flow)
@@ -1813,7 +1818,6 @@ class TFProcess:
             # square embedding
             flow = tf.keras.layers.Dense(self.embedding_size,
                                          kernel_initializer='glorot_normal',
-                                         kernel_regularizer=self.l2reg,
                                          activation=self.DEFAULT_ACTIVATION,
                                          name='embedding')(flow)
 
@@ -1834,7 +1838,7 @@ class TFProcess:
         flow_ = flow
 
         policy_tokens = tf.keras.layers.Dense(self.pol_embedding_size, kernel_initializer="glorot_normal",
-                                              kernel_regularizer=self.l2reg, activation=self.DEFAULT_ACTIVATION,
+                                              activation=self.DEFAULT_ACTIVATION,
                                               name=name+"policy/embedding")(flow_)
 
         def policy_head(name, activation=None, depth=None, opponent=False):
@@ -1971,7 +1975,6 @@ class TFProcess:
         def future_head(name):
             fut = tf.keras.layers.Dense(13 * self.n_future_boards,
                                         kernel_initializer="glorot_normal",
-                                        kernel_regularizer=self.l2reg,
                                         name=name+"/dense")(flow)
             fut = tf.reshape(fut, [-1, 64, self.n_future_boards, 13])
             return fut
