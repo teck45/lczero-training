@@ -41,9 +41,9 @@ def parse_function(planes, probs, winner, q, plies_left, st_q, opp_probs, next_p
     st_q = tf.reshape(st_q, (-1, 3))
     opp_probs = tf.reshape(opp_probs, (-1, 1858))
     next_probs = tf.reshape(next_probs, (-1, 1858))
-    fut = tf.reshape(fut, (-1, 16, 13, 64))
+    fut = tf.reshape(fut, (-1, 16, 12, 64))
     fut = tf.transpose(fut, perm=[0, 3, 1, 2])
-
+    fut = tf.concat([fut, 1 - tf.reduce_sum(fut, axis=-1, keepdims=True)], axis=-1)
 
 
     return (planes, probs, winner, q, plies_left, st_q, opp_probs, next_probs, fut)

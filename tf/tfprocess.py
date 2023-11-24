@@ -483,10 +483,11 @@ class TFProcess:
         def split_value_buckets(x, n_buckets=None, lo=-1, hi=1):
             if n_buckets is None:
                 n_buckets = self.categorical_value_buckets
-            x = tf.clip_by_value(x, lo, hi - 1e-9)
             x = (x - lo) / (hi - lo) * n_buckets
+            x = tf.clip_by_value(x, 0, n_buckets - 1)
             x = tf.cast(x, tf.int32)
-            return tf.one_hot(x, n_buckets, dtype=tf.float32)
+            out = tf.one_hot(x, n_buckets, dtype=tf.float32)
+            return out
 
         def categorical_value_loss(target, output):
             target = convert_val_to_scalar(target, softmax=False)
@@ -788,8 +789,8 @@ class TFProcess:
             Metric("P SL", "Policy SL"),
             Metric("VW", "Value Winner Loss"),
             Metric("VQ", "Value Q Loss"),
-            Metric("V Q Err", "Value Err L"),
-            Metric("V Q Cat", "Value Cat L"),
+            Metric("V Q Err", "Value Q Err L"),
+            Metric("V Q Cat", "Value Q Cat L"),
             Metric("V ST", "Value ST Loss"),
             Metric("V ST Err", "Value ST Err Loss"),
             Metric("V ST Cat", "Value ST Cat Loss"),
@@ -819,8 +820,8 @@ class TFProcess:
             Metric("P SL", "Policy SL"),
             Metric("VW", "Value Winner Loss"),
             Metric("VQ", "Value Q Loss"),
-            Metric("V Q Err", "Value Err L"),
-            Metric("V Q Cat", "Value Cat L"),
+            Metric("V Q Err", "Value Q Err L"),
+            Metric("V Q Cat", "Value Q Cat L"),
             Metric("V ST", "Value ST Loss"),
             Metric("V ST Err", "Value ST Err Loss"),
             Metric("V ST Cat", "Value ST Cat Loss"),
@@ -1965,7 +1966,7 @@ class TFProcess:
             return value, value_err, value_cat
 
         value_winner, value_winner_err, value_winner_cat = value_head(
-            name="value/winner", wdl=self.wdl, use_err=False)
+            name="value/winner", wdl=self.wdl, use_err=False, use_cat=False)
         value_q, value_q_err, value_q_cat = value_head(
             name="value/q", wdl=self.wdl, use_err=True) if self.cfg['model'].get('value_q', False) else (None, None, None)
         value_st, value_st_err, value_st_cat = value_head(
