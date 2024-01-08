@@ -12,6 +12,7 @@ dataset:
     - "/mnt/testdata/*/"
   train_workers: 8
   test_workers: 4
+  fast_chunk_loading: true
 training:
     precision: half 
     swa: true
@@ -63,6 +64,8 @@ training:
     beta_2: 0.98 
     epsilon: 0.00000001 # 1e-7
     sparse: false
+
+    return_attn_wts: false
 
 model:              
     embedding_size: 512

@@ -215,6 +215,8 @@ class TFProcess:
 
         self.embedding_style = self.cfg["model"].get(
             "embedding_style", "new").lower()
+        
+        self.return_attn_wts = self.cfg["model"].get("return_attn_wts", False)
 
         # experiments with changing have failed
         self.encoder_norm = RMSNorm if self.encoder_rms_norm else tf.keras.layers.LayerNormalization
@@ -692,7 +694,7 @@ class TFProcess:
         def value_err_loss(value_target, value, output):
             value = convert_val_to_scalar(value, softmax=True)
             value_target = convert_val_to_scalar(value_target, softmax=False)
-            true_error = tf.math.squared_difference(value_target, value)
+            true_error = tf.stop_gradient(tf.math.squared_difference(value_target, value))
             loss = tf.math.squared_difference(true_error, output)
             return tf.reduce_mean(input_tensor=loss)
 
@@ -2000,8 +2002,11 @@ class TFProcess:
             "value_st_err": value_st_err,
             "value_st_cat": value_st_cat,
             "moves_left": moves_left,
-            "attn_wts": attn_wts,
         }
+
+        if self.return_attn_wts:
+            outputs["attn_wts"] = attn_wts
+
         # Tensorflow does not accept None values in the output dictionary
         none_keys = []
         for key in outputs:

@@ -24,7 +24,10 @@ import glob
 import gzip
 import random
 import multiprocessing as mp
+import itertools
 from chunkparser import ChunkParser
+import random
+import pickle
 
 
 SKIP = 32
@@ -32,26 +35,66 @@ SKIP = 32
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
 
 
+def fast_get_chunks(d):
+    d = d.replace("*/", "")
+    chunknames = []
+    fo_chunknames = []
+    subdirs = os.listdir(d)
+    chunkfiles_name = "chunknames.pkl"
+    if False and chunkfiles_name in subdirs: # TODO: remove False
+        print(f"Using cached {d + chunkfiles_name}" )
+        with open(d + chunkfiles_name, 'rb') as f:
+            chunknames = pickle.load(f)
+    else:
+
+        i = 0
+        for subdir in subdirs:
+            if subdir.endswith(".gz"):
+                fo_chunknames.append(d + subdir)
+            else:
+                prefix = d + subdir + "/"
+                if os.path.isdir(prefix):
+                    chunknames.append([prefix + s for s in os.listdir(prefix) if s.endswith(".gz")])
+
+            i += 1
+        chunknames.append(fo_chunknames)
+            
+        chunknames = list(itertools.chain.from_iterable(chunknames))
+
+        with open(d + chunkfiles_name, 'wb') as f:
+            print("Shuffling the chunks", flush=True)
+            random.shuffle(chunknames)
+            print(f"Caching {d + chunkfiles_name}" )
+            pickle.dump(chunknames, f)
+
+    return chunknames
+
+
+
 def get_chunks(data_prefix):
     return glob.glob(data_prefix + "*.gz")
 
 
-def get_all_chunks(path):
+def get_all_chunks(path, fast=False):
+
     if isinstance(path, list):
         print("getting chunks for", path)
         chunks = []
         for i in path:
-            chunks += get_all_chunks(i)
+            chunks += get_all_chunks(i, fast=fast)
         return chunks
-    chunks = []
-    for d in glob.glob(path):
-        chunks += get_chunks(d)
+    if fast:
+        chunks = fast_get_chunks(path)
+    else:
+        chunks = []
+        for d in glob.glob(path):
+            chunks += get_chunks(d)
     print("got", len(chunks), "chunks for", path)
     return chunks
 
 
-def get_latest_chunks(path, num_chunks, allow_less, sort_key_fn):
-    chunks = get_all_chunks(path)
+def get_latest_chunks(path, num_chunks, allow_less, sort_key_fn, fast=False):
+    chunks = get_all_chunks(path, fast=fast)
     if len(chunks) < num_chunks:
         if allow_less:
             print("sorting {} chunks...".format(len(chunks)),
@@ -64,9 +107,9 @@ def get_latest_chunks(path, num_chunks, allow_less, sort_key_fn):
             print("[done]")
             print("{} - {}".format(os.path.basename(chunks[-1]),
                                    os.path.basename(chunks[0])))
-            print("shuffling chunks", end="")
-            if False:
-                print("shuffling disabled")
+            print("shuffling chunks...", end="", flush=True)
+            if True:
+                print("shuffling disabled", flush=True)
             else:
                 random.shuffle(chunks)
             print("[done]")
@@ -124,6 +167,7 @@ def main(cmd):
     num_chunks = cfg["dataset"]["num_chunks"]
     allow_less = cfg["dataset"].get("allow_less_chunks", False)
     train_ratio = cfg["dataset"]["train_ratio"]
+    fast_chunk_loading = cfg["dataset"].get("fast_chunk_loading", True)
     num_train = int(num_chunks * train_ratio)
     num_test = num_chunks - num_train
     sort_type = cfg["dataset"].get("sort_type", "mtime")
@@ -137,12 +181,12 @@ def main(cmd):
         raise ValueError("Unknown dataset sort_type: {}".format(sort_type))
     if "input_test" in cfg["dataset"]:
         train_chunks = get_latest_chunks(cfg["dataset"]["input_train"],
-                                         num_train, allow_less, sort_key_fn)
+                                         num_train, allow_less, sort_key_fn, fast=fast_chunk_loading)
         test_chunks = get_latest_chunks(cfg["dataset"]["input_test"], num_test,
-                                        allow_less, sort_key_fn)
+                                        allow_less, sort_key_fn, fast=fast_chunk_loading)
     else:
         chunks = get_latest_chunks(cfg["dataset"]["input"], num_chunks,
-                                   allow_less, sort_key_fn)
+                                   allow_less, sort_key_fn, fast=fast_chunk_loading)
         if allow_less:
             num_train = int(len(chunks) * train_ratio)
             num_test = len(chunks) - num_train
@@ -188,7 +232,7 @@ def main(cmd):
     
     
     if "input_validation" in cfg["dataset"]:
-        valid_chunks = get_all_chunks(cfg["dataset"]["input_validation"])
+        valid_chunks = get_all_chunks(cfg["dataset"]["input_validation"], fast=fast_chunk_loading)
         validation_parser = ChunkParser(valid_chunks,
                                         get_input_mode(cfg),
                                         sample=1,
