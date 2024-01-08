@@ -201,6 +201,9 @@ class TFProcess:
             "soft_policy_temperature", 1.0)
 
         self.use_smolgen = self.cfg["model"].get("use_smolgen", False)
+        self.use_logit_gating = self.cfg["model"].get("use_logit_gating", False)
+        assert not (self.use_smolgen and self.use_logit_gating), "Cannot use both smolgen and logit gating"
+        
         self.smolgen_hidden_channels = self.cfg["model"].get(
             "smolgen_hidden_channels")
         self.smolgen_hidden_sz = self.cfg["model"].get("smolgen_hidden_sz")
@@ -1638,6 +1641,9 @@ class TFProcess:
             smolgen_weights = self.smolgen_weights(inputs, heads, self.smolgen_hidden_channels, self.smolgen_hidden_sz,
                                                    self.smolgen_gen_sz, name=name+"/smolgen", activation=self.smolgen_activation)
             scaled_attention_logits = scaled_attention_logits + smolgen_weights
+
+        if self.use_logit_gating:
+            scaled_attention_logits = Gating(name=name+"/gating")(scaled_attention_logits)
 
         # 0 h 64 64
         attention_weights = tf.nn.softmax(scaled_attention_logits, axis=-1)

@@ -95,6 +95,7 @@ model:
     smolgen_gen_sz: 256
     smolgen_activation: 'swish'
 
+    use_logit_gating: false
 
     omit_qkv_biases: true # these two increases training speed by ~10% on BT4 
     encoder_rms_norm: true # without quality degradation
