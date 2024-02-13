@@ -88,6 +88,7 @@ class RMSNorm(tf.keras.layers.Layer):
         self.gamma = self.add_weight(name="gamma",
                                      shape=[input_shape[-1]],
                                      initializer="ones",
+                                     constraint=tf.keras.constraints.NonNeg(),
                                      trainable=True) if self.scale else 1
 
     def call(self, inputs):
@@ -1631,9 +1632,13 @@ class TFProcess:
     def scaled_dot_product_attention(self, q, k, v, name: str = None, inputs=None):
 
         # 0 h 64 d, 0 h d 64
+        dk = tf.cast(tf.shape(k)[-1], self.model_dtype)
+        scaleDivisor = tf.pow(dk, 0.25)
+        # q = q / scaleDivisor
+        # k = k / scaleDivisor
+
         matmul_qk = tf.matmul(q, k, transpose_b=True)
         batch_size = tf.shape(q)[0]
-        dk = tf.cast(tf.shape(k)[-1], self.model_dtype)
         scaled_attention_logits = matmul_qk / tf.math.sqrt(dk)
         heads = scaled_attention_logits.shape[1]
 
@@ -1655,27 +1660,29 @@ class TFProcess:
 
     # multi-head attention in encoder blocks
 
-    def mha(self, inputs, emb_size: int, d_model: int, num_heads: int, initializer, name: str):
-        assert d_model % num_heads == 0
-        depth = d_model // num_heads
+    def mha(self, inputs, emb_size: int, d_model: int, num_heads: int, initializer, name: str, att_expansion: int=1):
+        depth = d_model * att_expansion
+        assert depth % num_heads == 0
+        
+        head_depth = depth // num_heads
         # query, key, and value vectors for self-attention
         # inputs b, 64, sz
 
         use_bias = not self.omit_qkv_biases
 
         q = tf.keras.layers.Dense(
-            d_model, name=name+"/wq", kernel_initializer="glorot_normal", use_bias=use_bias)(inputs)
+            depth, name=name+"/wq", kernel_initializer="glorot_normal", use_bias=use_bias)(inputs)
         k = tf.keras.layers.Dense(
-            d_model, name=name+"/wk", kernel_initializer="glorot_normal", use_bias=use_bias)(inputs)
+            depth, name=name+"/wk", kernel_initializer="glorot_normal", use_bias=use_bias)(inputs)
         v = tf.keras.layers.Dense(
-            d_model, name=name+"/wv", kernel_initializer=initializer, use_bias=use_bias)(inputs)
+            depth, name=name+"/wv", kernel_initializer=initializer, use_bias=use_bias)(inputs)
 
         # split q, k and v into smaller vectors of size "depth" -- one for each head in multi-head attention
         batch_size = tf.shape(q)[0]
 
-        q = self.split_heads(q, batch_size, num_heads, depth)
-        k = self.split_heads(k, batch_size, num_heads, depth)
-        v = self.split_heads(v, batch_size, num_heads, depth)
+        q = self.split_heads(q, batch_size, num_heads, head_depth)
+        k = self.split_heads(k, batch_size, num_heads, head_depth)
+        v = self.split_heads(v, batch_size, num_heads, head_depth)
 
         scaled_attention, attention_weights = self.scaled_dot_product_attention(
             q, k, v, name=name, inputs=inputs)
@@ -1685,11 +1692,9 @@ class TFProcess:
                                             perm=[0, 2, 1, 3])
             scaled_attention = tf.reshape(
                 scaled_attention,
-                (batch_size, -1, d_model))  # concatenate heads
+                (batch_size, -1, depth))  # concatenate heads
 
         # final dense layer
-
-
         output = tf.keras.layers.Dense(
             emb_size, name=name + "/dense", kernel_initializer=initializer, use_bias=not self.omit_other_biases)(scaled_attention)
         return output, attention_weights
@@ -1711,9 +1716,11 @@ class TFProcess:
     def encoder_layer(self, inputs, emb_size: int, d_model: int, num_heads: int, dff: int, name: str, training: bool):
         # DeepNorm
         alpha = tf.cast(tf.math.pow(
-            2. * self.encoder_layers, -0.25), self.model_dtype)
+            2. * self.encoder_layers, 0.25), self.model_dtype)
         beta = tf.cast(tf.math.pow(
             8. * self.encoder_layers, -0.25), self.model_dtype)
+
+
         xavier_norm = tf.keras.initializers.VarianceScaling(
             scale=beta, mode="fan_avg", distribution="truncated_normal", seed=42)
 
@@ -1724,8 +1731,10 @@ class TFProcess:
         # dropout for weight regularization
         attn_output = tf.keras.layers.Dropout(
             self.dropout_rate, name=name + "/dropout1")(attn_output, training=training)
+
         # skip connection + layernorm
-        out1 = inputs + attn_output * alpha
+        out1 = alpha * inputs + attn_output
+        # out1 = inputs
         if not self.skip_first_ln:
             out1 = self.encoder_norm(
                 name=name+"/ln1")(out1)
@@ -1736,8 +1745,10 @@ class TFProcess:
         ffn_output = tf.keras.layers.Dropout(
             self.dropout_rate, name=name + "/dropout2")(ffn_output, training=training)
 
+        out2 = alpha * out1 + ffn_output
+
         out2 = self.encoder_norm(
-            name=name+"/ln2")(out1 + ffn_output * alpha)
+            name=name+"/ln2")(out2)
 
         return out2, attn_wts
 
@@ -1792,9 +1803,12 @@ class TFProcess:
 
             # DeepNorm
             alpha = tf.cast(tf.math.pow(
-                2. * self.encoder_layers, -0.25), self.model_dtype)
+                2. * self.encoder_layers, 0.25), self.model_dtype)
             beta = tf.cast(tf.math.pow(
                 8. * self.encoder_layers, -0.25), self.model_dtype)
+
+
+
             xavier_norm = tf.keras.initializers.VarianceScaling(
                 scale=beta, mode="fan_avg", distribution="truncated_normal", seed=42)
 
@@ -1802,8 +1816,10 @@ class TFProcess:
             ffn_output = self.ffn(flow, self.embedding_size, self.encoder_dff,
                                   xavier_norm, name=name + "embedding/ffn")
 
+
+
             flow = self.encoder_norm(
-                name=name+"embedding/ffn_ln")(flow + ffn_output * alpha)
+                name=name+"embedding/ffn_ln")(alpha * flow + ffn_output)
 
         elif self.embedding_style == "old":
             flow = tf.transpose(inputs, perm=[0, 2, 3, 1])
