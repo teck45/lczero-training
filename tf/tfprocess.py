@@ -20,9 +20,6 @@
 import numpy as np
 import os
 import tensorflow as tf
-import tensorflow_addons as tfa
-from tensorflow_addons.optimizers.weight_decay_optimizers import (
-    extend_with_decoupled_weight_decay)
 import time
 import bisect
 import lc0_az_policy_map
@@ -32,6 +29,10 @@ from functools import reduce
 import operator
 import functools
 from net import Net
+import tensorflow_models as tfm
+
+from keras import backend as K
+
 
 def get_activation(activation):
     if isinstance(activation, str) or activation is None:
@@ -39,6 +40,7 @@ def get_activation(activation):
             return tf.keras.activations.get(activation)
         except:
             if activation == "mish":
+                import tensorflow_addons as tfa
                 return tfa.activations.mish
             else:
                 raise ValueError(f"{activation=} not recognized")
@@ -314,9 +316,11 @@ class TFProcess:
             self.net.set_defaultactivation(
                 pb.NetworkFormat.DEFAULT_ACTIVATION_MISH)
             try:
-                self.DEFAULT_ACTIVATION = tfa.activations.mish
-            except:
                 self.DEFAULT_ACTIVATION = tf.keras.activations.mish
+            except:
+                import tensorflow_addons as tfa
+                self.DEFAULT_ACTIVATION = tfa.activations.mish
+                
         else:
             raise ValueError("Unknown default activation type: {}".format(
                 default_activation))
@@ -422,6 +426,25 @@ class TFProcess:
         outputs = self.construct_net(input_var)
         self.model = tf.keras.Model(inputs=input_var, outputs=outputs)
 
+        
+
+        print(f"params: {self.model.count_params()}")
+        smolgen_params = np.sum([K.count_params(w) for w in self.model.trainable_weights if "smolgen" in w.name])
+        emb_params = np.sum([K.count_params(w) for w in self.model.trainable_weights if "embedding/preprocess" in w.name])
+
+        
+        print(f"smolgen params: {smolgen_params}")
+        print(f"emb preproc params: {emb_params}")
+
+
+
+        try:
+            flops =  tfm.core.train_utils.try_count_flops(self.model)
+            print(f"FLOPS: {flops / 10 ** 9:.03} G")
+        except:
+            print("keras flops module not found, won't count flops")
+
+
         # swa_count initialized regardless to make checkpoint code simpler.
         self.swa_count = tf.Variable(0., name='swa_count', trainable=False)
         self.swa_weights = None
@@ -457,16 +480,6 @@ class TFProcess:
         elif self.optimizer_name == "nadam":
             self.optimizer = tf.keras.optimizers.Nadam(
                 learning_rate=self.active_lr, beta_1=self.beta_1, beta_2=self.beta_2, epsilon=self.epsilon)
-            if self.weight_decay > 0:
-                print("using DecoupledWeightDecayExtension")
-
-                MyNadamW = extend_with_decoupled_weight_decay(
-                    tf.keras.optimizers.Nadam)
-                self.optimizer = MyNadamW(weight_decay=self.weight_decay, learning_rate=self.active_lr,
-                                          beta_1=self.beta_1, beta_2=self.beta_2, epsilon=self.epsilon)
-        elif self.optimizer_name == "adabelief":
-            self.optimizer = tfa.optimizers.AdaBelief(weight_decay=self.weight_decay, learning_rate=self.active_lr,
-                                                      beta_1=self.beta_1, beta_2=self.beta_2, epsilon=self.epsilon)
         else:
             raise ValueError("Unknown optimizer: " + self.optimizer_name)
 
@@ -478,8 +491,6 @@ class TFProcess:
         if self.loss_scale != 1:
             self.optimizer = tf.keras.mixed_precision.LossScaleOptimizer(
                 self.optimizer, dynamic=True)
-        if self.cfg['training'].get('lookahead_optimizer'):
-            self.optimizer = tfa.optimizers.Lookahead(self.optimizer)
 
         def split_value_buckets(x, n_buckets=None, lo=-1, hi=1):
             if n_buckets is None:
@@ -1332,11 +1343,10 @@ class TFProcess:
         if self.validation_dataset is not None and (
                 steps % self.cfg["training"]["validation_steps"] == 0
                 or steps % self.cfg["training"]["total_steps"] == 0):
-            with tf.profiler.experimental.Trace("Validate", step_num=steps):
-                if self.swa_enabled:
-                    self.calculate_swa_validations(steps)
-                else:
-                    self.calculate_test_validations(steps)
+            if self.swa_enabled:
+                self.calculate_swa_validations(steps)
+            else:
+                self.calculate_test_validations(steps)
 
         # Save session and weights at end, and also optionally every "checkpoint_steps".
         if steps % self.cfg["training"]["total_steps"] == 0 or (
@@ -1365,7 +1375,7 @@ class TFProcess:
                     for (old, w) in zip(backup, self.model.weights):
                         w.assign(old)
 
-                if True:  # hack protobuf not working !!!
+                if not self.cfg["training"].get("disable_pb_checkpointing"):  
                     path = os.path.join(self.root_dir, self.cfg["name"])
                     leela_path = path + "-" + str(evaled_steps)
                     swa_path = path + "-swa-" + str(evaled_steps)
@@ -1525,6 +1535,17 @@ class TFProcess:
                 tf.summary.scalar(metric.long_name, metric.get(), step=steps)
             for w in self.model.weights:
                 tf.summary.histogram(w.name, w, step=steps)
+            params = self.model.count_params() 
+            smolgen_params = np.sum([K.count_params(w) for w in self.model.trainable_weights if "smol" in w.name])
+            emb_params = np.sum([K.count_params(w) for w in self.model.trainable_weights if "embedding/preprocess" in w.name])
+            flops =  tfm.core.train_utils.try_count_flops(self.model)
+            if steps == 1:
+                tf.summary.text("Params", str(smolgen_params), step=steps)
+                tf.summary.text("Smolgen params", str(smolgen_params), step=steps)
+                tf.summary.text("Embedding params", str(emb_params), step=steps)
+                tf.summary.text("FLOPS", str(flops), step=steps)
+
+
         self.test_writer.flush()
 
         print("step {},".format(steps), end="")
@@ -1546,6 +1567,7 @@ class TFProcess:
             w.assign(old)
 
     def calculate_test_validations(self, steps: int):
+        print("logging test validations")
         for metric in self.test_metrics:
             metric.reset()
         for (x, y, z, q, m, st_q, opp_idx, next_idx) in self.validation_dataset:
