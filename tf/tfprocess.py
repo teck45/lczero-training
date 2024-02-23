@@ -91,15 +91,14 @@ class Quantize(tf.keras.layers.Layer):
         return quantize(x, self.s, self.n_bits)
 
 class DenseLayer(tf.keras.layers.Layer):
-    def __init__(self, units, activation=None, n_bits=8, use_bias=True, kernel_initializer=None, quantize_kernel=False, quantize_input=False, **kwargs):
+    def __init__(self, units, activation=None, n_bits=8, use_bias=True, kernel_initializer=None, quantized=False, **kwargs):
         super(DenseLayer, self).__init__(**kwargs)
         self.units = units
         self.activation = get_activation(activation)
         self.n_bits = n_bits
         self.use_bias = use_bias
         self.kernel_initializer = kernel_initializer
-        self.should_quantize_kernel = quantize_kernel
-        self.should_quantize_input = quantize_input
+        self.quantized=quantized
 
     
     def build(self, input_shape):
@@ -107,14 +106,11 @@ class DenseLayer(tf.keras.layers.Layer):
         self.kernel = self.add_weight(name='kernel', shape=[self.in_units, self.units], initializer=self.kernel_initializer, trainable=True)
         if self.use_bias:
             self.bias = self.add_weight(name='bias', shape=[self.units], initializer='zeros', trainable=True)
-        if self.should_quantize_kernel:
-            self.quantize_kernel = Quantize(n_bits=self.n_bits, name=self.name + '/kernel_quantize')
-        if self.should_quantize_input:
-            self.quantize_input = Quantize(n_bits=self.n_bits, name=self.name + '/input_quantize')
+        if self.quantized:
+            self.quantizer = Quantize(n_bits=self.n_bits, name=self.name + '/quantizer')
     
     def call(self, x):
-        kernel = self.quantize_kernel(self.kernel) if self.should_quantize_kernel else self.kernel
-        x = self.quantize_input(x) if self.should_quantize_input else x
+        kernel = self.quantizer(self.kernel) if self.quantized else self.kernel
         out = tf.matmul(x, kernel)
         if self.use_bias:
             out = tf.add(out, self.bias)
@@ -1817,9 +1813,9 @@ class TFProcess:
 
 
         if self.use_rpe_q:
-            matmul_qk = matmul_qk + RPELogits(name=name+"/rpe_logits_q", rpe_type='q')(q)
+            matmul_qk = matmul_qk + RPELogits(name=name+"/rpe_q", rpe_type='q')(q)
         if self.use_rpe_k:
-            matmul_qk = matmul_qk + RPELogits(name=name+"/rpe_logits_k", rpe_type='k')(k)
+            matmul_qk = matmul_qk + RPELogits(name=name+"/rpe_k", rpe_type='k')(k)
 
 
         scaled_attention_logits = matmul_qk / tf.math.sqrt(dk)
@@ -1860,14 +1856,14 @@ class TFProcess:
         use_bias = not self.omit_qkv_biases
 
         if self.quantize:
-            inputs = Quantize(name=name+"/in_quantize")(inputs)
+            inputs = Quantize(name=name+"/quantize_1")(inputs)
 
         q = DenseLayer(
-            depth, name=name+"/wq", kernel_initializer="glorot_normal", use_bias=use_bias, quantize_input=False, quantize_kernel=self.quantize)(inputs)
+            depth, name=name+"/wq", kernel_initializer="glorot_normal", use_bias=use_bias, quantized=self.quantize)(inputs)
         k = DenseLayer(
-            depth, name=name+"/wk", kernel_initializer="glorot_normal", use_bias=use_bias, quantize_input=False, quantize_kernel=self.quantize)(inputs)
+            depth, name=name+"/wk", kernel_initializer="glorot_normal", use_bias=use_bias, quantized=self.quantize)(inputs)
         v = DenseLayer(
-            depth, name=name+"/wv", kernel_initializer=initializer, use_bias=use_bias, quantize_input=False, quantize_kernel=self.quantize)(inputs)
+            depth, name=name+"/wv", kernel_initializer=initializer, use_bias=use_bias, quantized=self.quantize)(inputs)
 
         
         v_  = v
@@ -1893,11 +1889,14 @@ class TFProcess:
         if self.use_static_attention:
             static_attention = StaticAttention(name=name+"/static_attention")(v_)
             scaled_attention = tf.concat([scaled_attention, static_attention], axis=-1)
+        
+        if self.quantize:
+            scaled_attention = Quantize(name=name+"/quantize_2")(scaled_attention)
 
         # output = tf.keras.layers.Dense(
         #     emb_size, name=name + "/dense", kernel_initializer=initializer, use_bias=not self.omit_other_biases)(scaled_attention)
 
-        output = DenseLayer(emb_size, name=name + "/dense", kernel_initializer=initializer, use_bias=not self.omit_other_biases, quantize_input=self.quantize, quantize_kernel=self.quantize)(scaled_attention)
+        output = DenseLayer(emb_size, name=name + "/dense", kernel_initializer=initializer, use_bias=not self.omit_other_biases, quantized=self.quantize)(scaled_attention)
         return output, attention_weights
 
     # 2-layer dense feed-forward network in encoder blocks
@@ -1910,13 +1909,21 @@ class TFProcess:
         # dense1 = tf.keras.layers.Dense(
         #     dff, name=name + "/dense1", kernel_initializer=initializer, activation=activation, use_bias=not self.omit_other_biases)(inputs)
 
+                
+        if self.quantize:
+            inputs = Quantize(name=name+"/quantize_1")(inputs)
+
         dense1 = DenseLayer(dff, name=name + "/dense1", kernel_initializer=initializer, activation=activation,
-                    use_bias=not self.omit_other_biases, quantize_input=self.quantize, quantize_kernel=self.quantize)(inputs)
+                    use_bias=not self.omit_other_biases, quantized=self.quantize)(inputs)
 
         # out = tf.keras.layers.Dense(
         #     emb_size, name=name + "/dense2", kernel_initializer=initializer, use_bias=not self.omit_other_biases)(dense1)
 
-        out = DenseLayer(emb_size, name=name + "/dense2", kernel_initializer=initializer, use_bias=not self.omit_other_biases, quantize_input=self.quantize, quantize_kernel=self.quantize)(dense1)
+                
+        if self.quantize:
+            dense1 = Quantize(name=name+"/quantize_2")(dense1)
+
+        out = DenseLayer(emb_size, name=name + "/dense2", kernel_initializer=initializer, use_bias=not self.omit_other_biases, quantized=self.quantize)(dense1)
 
         return out
 

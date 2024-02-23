@@ -371,15 +371,24 @@ class Net:
 
         def mha_to_bp(l, w):
             s = ''
-            if l.startswith('dense'):
+            # for these first two the only possibilities are the input step sizes
+            if l == 'quantize_1':
+                return 's1'
+            elif l == 'quantize_2':
+                return 's2'
+            elif l.startswith('rpe'):
+                return l
+            elif l.startswith('dense'):
                 s = 'dense'
             elif l.startswith('w'):
                 s = l[1]
+                
+
             else:
                 raise ValueError('Unable to decode mha weight {}/{}'.format(
                     l, w))
             w = w.split(':')[0]
-            d = {'kernel': '{}_w', 'bias': '{}_b'}
+            d = {'kernel': '{}_w', 'bias': '{}_b', 's': '{}_s'}
 
             return d[w].format(s)
 
@@ -406,7 +415,11 @@ class Net:
 
         def ffn_to_bp(l, w):
             w = w.split(':')[0]
-            d = {'kernel': '{}_w', 'bias': '{}_b'}
+            if l == 'quantize_1':
+                return 's1'
+            elif l == 'quantize_2':
+                return 's2'
+            d = {'kernel': '{}_w', 'bias': '{}_b', 's': '{}_s'}
 
             return d[w].format(l)
 
