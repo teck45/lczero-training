@@ -569,6 +569,12 @@ class TFProcess:
         outputs = self.construct_net(input_var)
         self.model = tf.keras.Model(inputs=input_var, outputs=outputs)
 
+        restore_path = self.cfg['training'].get("pb_source", None)
+        if restore_path is not None:
+            self.replace_weights(restore_path, ignore_errors=True)
+
+
+
 
         
 
@@ -1030,9 +1036,9 @@ class TFProcess:
 
     # False to True is a hack to keep net to model working with atnb
     def replace_weights(self, proto_filename: str, ignore_errors: bool = False):
+        print(f"Restoring from {proto_filename}")
         self.net.parse_proto(proto_filename)
 
-        filters, blocks = self.net.filters(), self.net.blocks()
         if not ignore_errors:
             if self.POLICY_HEAD != self.net.pb.format.network_format.policy:
                 raise ValueError("Policy head type doesn't match the network")
@@ -1072,26 +1078,28 @@ class TFProcess:
                     raise KeyError(error_string)
 
             if weight.shape.ndims == 4:
-                # Rescale rule50 related weights as clients do not normalize the input.
-                if weight.name == "input/conv2d/kernel:0" and self.net.pb.format.network_format.input < pb.NetworkFormat.INPUT_112_WITH_CANONICALIZATION_HECTOPLIES:
-                    num_inputs = 112
-                    # 50 move rule is the 110th input, or 109 starting from 0.
-                    rule50_input = 109
-                    for i in range(len(new_weight)):
-                        if (i % (num_inputs * 9)) // 9 == rule50_input:
-                            new_weight[i] = new_weight[i] * 99
+                # # Rescale rule50 related weights as clients do not normalize the input.
+                # if weight.name == "input/conv2d/kernel:0" and self.net.pb.format.network_format.input < pb.NetworkFormat.INPUT_112_WITH_CANONICALIZATION_HECTOPLIES:
+                #     num_inputs = 112
+                #     # 50 move rule is the 110th input, or 109 starting from 0.
+                #     rule50_input = 109
+                #     for i in range(len(new_weight)):
+                #         if (i % (num_inputs * 9)) // 9 == rule50_input:
+                #             new_weight[i] = new_weight[i] * 99
 
-                # Convolution weights need a transpose
-                #
-                # TF (kYXInputOutput)
-                # [filter_height, filter_width, in_channels, out_channels]
-                #
-                # Leela/cuDNN/Caffe (kOutputInputYX)
-                # [output, input, filter_size, filter_size]
-                s = weight.shape.as_list()
-                shape = [s[i] for i in [3, 2, 0, 1]]
-                new_weight = tf.constant(new_weight, shape=shape)
-                weight.assign(tf.transpose(a=new_weight, perm=[2, 3, 1, 0]))
+                # # Convolution weights need a transpose
+                # #
+                # # TF (kYXInputOutput)
+                # # [filter_height, filter_width, in_channels, out_channels]
+                # #
+                # # Leela/cuDNN/Caffe (kOutputInputYX)
+                # # [output, input, filter_size, filter_size]
+                # s = weight.shape.as_list()
+                # shape = [s[i] for i in [3, 2, 0, 1]]
+                # new_weight = tf.constant(new_weight, shape=shape)
+                # weight.assign(tf.transpose(a=new_weight, perm=[2, 3, 1, 0]))
+                new_weight = tf.constant(new_weight, shape=weight.shape)
+                weight.assign(new_weight)
             elif weight.shape.ndims == 2:
                 # Fully connected layers are [in, out] in TF
                 #
