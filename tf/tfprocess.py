@@ -573,7 +573,7 @@ class TFProcess:
         
 
         print(f"params: {self.model.count_params()}")
-        smolgen_params = np.sum([K.count_params(w) for w in self.model.trainable_weights if "smolgen" in w.name])
+        smolgen_params = np.sum([K.count_params(w) for w in self.model.trainable_weights if "smol" in w.name])
         emb_params = np.sum([K.count_params(w) for w in self.model.trainable_weights if "embedding/preprocess" in w.name])
 
         
@@ -1686,9 +1686,12 @@ class TFProcess:
             params = self.model.count_params() 
             smolgen_params = np.sum([K.count_params(w) for w in self.model.trainable_weights if "smol" in w.name])
             emb_params = np.sum([K.count_params(w) for w in self.model.trainable_weights if "embedding/preprocess" in w.name])
-            flops =  tfm.core.train_utils.try_count_flops(self.model)
+            try:
+                flops =  tfm.core.train_utils.try_count_flops(self.model)
+            except:
+                flops = 0
             if steps == 1:
-                tf.summary.text("Params", str(smolgen_params), step=steps)
+                tf.summary.text("Params", str(params), step=steps)
                 tf.summary.text("Smolgen params", str(smolgen_params), step=steps)
                 tf.summary.text("Embedding params", str(emb_params), step=steps)
                 tf.summary.text("FLOPS", str(flops), step=steps)
