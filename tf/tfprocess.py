@@ -70,9 +70,10 @@ def quantize(x, s, n_bits=8):
 
         # the gradient is Q_p if x / s is at least Q_p, similar with Q_n
         
-        ds_dy = tf.where(tf.math.equal(quantized_x,  rounded_scaled_x), rounded_scaled_x - scaled_x, quantized_x)
-        ds = tf.reduce_sum(tf.math.multiply(ds_dy, dy)) 
-        ds = ds / tf.math.sqrt(tf.cast(tf.size(ds), q_positive.dtype) * q_positive) / 10
+        not_oob = tf.math.equal(quantized_x,  rounded_scaled_x)
+        ds_dy = tf.where(not_oob, rounded_scaled_x - scaled_x, quantized_x)
+        ds = tf.reduce_mean(tf.math.multiply(ds_dy, dy)) / 10
+        dy = tf.where(not_oob, dy, 0)
 
         return dy, ds, None
     
@@ -1866,6 +1867,8 @@ class TFProcess:
 
         use_bias = not self.omit_qkv_biases
 
+        inputs_ = inputs
+
         if self.quantize:
             inputs = Quantize(name=name+"/quantize_1")(inputs)
 
@@ -1887,7 +1890,7 @@ class TFProcess:
         v = self.split_heads(v, batch_size, num_heads, head_depth)
 
         scaled_attention, attention_weights = self.scaled_dot_product_attention(
-            q, k, v, name=name, inputs=inputs)
+            q, k, v, name=name, inputs=inputs_)
 
         if num_heads > 1:
             scaled_attention = tf.transpose(scaled_attention,
