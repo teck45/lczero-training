@@ -29,7 +29,7 @@ from functools import reduce
 import operator
 import functools
 from net import Net
-import tensorflow_models as tfm
+
 
 from keras import backend as K
 
@@ -49,7 +49,7 @@ def get_activation(activation):
 
 
 @tf.custom_gradient
-def quantize(x, s, n_bits=8):
+def quantize(x, s, n_bits=8, n_features=1):
     
     # STE
 
@@ -72,24 +72,32 @@ def quantize(x, s, n_bits=8):
         
         not_oob = tf.math.equal(quantized_x,  rounded_scaled_x)
         ds_dy = tf.where(not_oob, rounded_scaled_x - scaled_x, quantized_x)
-        ds = tf.reduce_mean(tf.math.multiply(ds_dy, dy)) / 10
+        ds = tf.reduce_sum(tf.math.multiply(ds_dy, dy)) / tf.math.sqrt(tf.cast(n_features, q_positive.dtype) * q_positive) * 100 # scale this up
         dy = tf.where(not_oob, dy, 0)
 
-        return dy, ds, None
+        return dy, ds, None, None
     
     return out, grad
 
 class Quantize(tf.keras.layers.Layer):
-    def __init__(self, n_bits=8, **kwargs):
+    def __init__(self, n_bits=8, is_kernel=False, need_init=True,**kwargs):
         super(Quantize, self).__init__(**kwargs)
         self.n_bits = n_bits
+        self.is_kernel=is_kernel
+        self.need_init = need_init
     
     def build(self, input_shape):
         self.s = self.add_weight(name='s', shape=[1], initializer=tf.constant_initializer(0.002),
                                  trainable=True, constraint=tf.keras.constraints.NonNeg())
     
     def call(self, x):
-        return quantize(x, self.s, self.n_bits)
+        if self.need_init:
+            # use 3 times estimated std dev over 2 ^ (n_bits - 1) as initial s
+            self.s.assign(tf.math.reduce_std(x) * 3 / (2**(self.n_bits - 1)))
+            self.need_init = False
+            return x # no quantization on first call
+        n_features = tf.size(x) if self.is_kernel else tf.reduce_prod(tf.shape(x)[1:])
+        return quantize(x, self.s, self.n_bits, n_features)
 
 class DenseLayer(tf.keras.layers.Layer):
     def __init__(self, units, activation=None, n_bits=8, use_bias=True, kernel_initializer=None, quantized=False, **kwargs):
@@ -108,7 +116,7 @@ class DenseLayer(tf.keras.layers.Layer):
         if self.use_bias:
             self.bias = self.add_weight(name='bias', shape=[self.units], initializer='zeros', trainable=True)
         if self.quantized:
-            self.quantizer = Quantize(n_bits=self.n_bits, name=self.name + '/quantizer')
+            self.quantizer = Quantize(n_bits=self.n_bits, name=self.name + '/quantizer', is_kernel=True)
     
     def call(self, x):
         kernel = self.quantizer(self.kernel) if self.quantized else self.kernel
@@ -570,9 +578,6 @@ class TFProcess:
         outputs = self.construct_net(input_var)
         self.model = tf.keras.Model(inputs=input_var, outputs=outputs)
 
-        restore_path = self.cfg['training'].get("pb_source", None)
-        if restore_path is not None:
-            self.replace_weights(restore_path, ignore_errors=True)
 
 
 
@@ -590,6 +595,8 @@ class TFProcess:
 
 
         try:
+            import tensorflow_models as tfm
+
             flops =  tfm.core.train_utils.try_count_flops(self.model)
             print(f"FLOPS: {flops / 10 ** 9:.03} G")
         except:
@@ -604,6 +611,12 @@ class TFProcess:
             self.swa_weights = [
                 tf.Variable(w, trainable=False) for w in self.model.weights
             ]
+
+
+        
+        restore_path = self.cfg['training'].get("pb_source", None)
+        if restore_path is not None:
+            self.replace_weights(restore_path, ignore_errors=True)
 
         self.active_lr = tf.Variable(0.000001, trainable=False)
         # All 'new' (TF 2.10 or newer non-legacy) optimizers must have learning_rate updated manually.
@@ -1696,6 +1709,8 @@ class TFProcess:
             smolgen_params = np.sum([K.count_params(w) for w in self.model.trainable_weights if "smol" in w.name])
             emb_params = np.sum([K.count_params(w) for w in self.model.trainable_weights if "embedding/preprocess" in w.name])
             try:
+                import tensorflow_models as tfm
+
                 flops =  tfm.core.train_utils.try_count_flops(self.model)
             except:
                 flops = 0
@@ -2326,3 +2341,4 @@ class TFProcess:
             if layer.name in self.sparsity_patterns:
                 kernel = layer.kernel
                 kernel.assign(kernel * self.sparsity_patterns[layer.name])
+
