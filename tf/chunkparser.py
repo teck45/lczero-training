@@ -134,12 +134,14 @@ class ChunkParser:
                  diff_focus_slope=0,
                  diff_focus_q_weight=6.0,
                  diff_focus_pol_scale=3.5,
+                 pc_min=None,
+                 pc_max=None,
                  workers=None):
         self.inner = ChunkParserInner(self, chunks, expected_input_format,
                                       shuffle_size, sample, buffer_size,
                                       batch_size, diff_focus_min,
                                       diff_focus_slope, diff_focus_q_weight,
-                                      diff_focus_pol_scale, workers)
+                                      diff_focus_pol_scale, workers, pc_min, pc_max)
 
     def shutdown(self):
         """
@@ -163,8 +165,8 @@ class ChunkParser:
 class ChunkParserInner:
     def __init__(self, parent, chunks, expected_input_format, shuffle_size,
                  sample, buffer_size, batch_size, diff_focus_min,
-                 diff_focus_slope, diff_focus_q_weight, diff_focus_pol_scale,
-                 workers):
+                 diff_focus_slope, diff_focus_q_weight, diff_focus_pol_scale, 
+                 workers, pc_min=None, pc_max=None):
         """
         Read data and yield batches of raw tensors.
 
@@ -204,6 +206,8 @@ class ChunkParserInner:
         self.diff_focus_slope = diff_focus_slope
         self.diff_focus_q_weight = diff_focus_q_weight
         self.diff_focus_pol_scale = diff_focus_pol_scale
+        self.pc_min = pc_min
+        self.pc_max = pc_max
         # set the mini-batch size
         self.batch_size = batch_size
         # set number of elements in the shuffle buffer.
@@ -636,6 +640,22 @@ class ChunkParserInner:
                 pol_kld = struct.unpack("f", record[8348:8352])[0]
 
                 # if orig_q is NaN or pol_kld is 0, accept, else accept based on diff focus
+
+                try:
+                    if self.pc_min is not None or self.pc_max is not None:
+                        
+                        planes = record[7440: 7440+104]
+                        planes = np.unpackbits(np.frombuffer(planes, dtype=np.uint8)).astype(np.uint8)
+                        planes = np.reshape(planes, [13, 64])
+                        # pieces are listed our PNBRQKpnbrqk
+                        pc = np.sum(planes[1:5, :]) + np.sum(planes[7:11, :])
+                        if self.pc_min is not None and pc < self.pc_min:
+                            continue
+                        if self.pc_max is not None and pc > self.pc_max:
+                            continue
+                except Exception as e:
+                    print(e)
+
                 if not np.isnan(orig_q) and pol_kld > 0:
                     diff_q = abs(best_q - orig_q)
                     q_weight = self.diff_focus_q_weight

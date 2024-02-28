@@ -30,9 +30,22 @@ import operator
 import functools
 from net import Net
 
-
 from keras import backend as K
 
+
+
+def count_major_pieces(x):
+    # x has shape (batch, 64, 12)
+    # returns (batch)
+    # pieces are listed our PNBRQKpnbrqk
+
+    x = tf.transpose(x, perm=[0, 2, 3, 1])
+    x = tf.reshape(x, [-1, 64, tf.shape(x)[-1]])
+
+    x = x[..., :12]
+    out = tf.reduce_sum(x[:, :, 1:5], axis=[1,2])
+    out += tf.reduce_sum(x[:, :, 7:11], axis=[1,2])
+    return out
 
 def get_activation(activation):
     if isinstance(activation, str) or activation is None:
@@ -49,7 +62,7 @@ def get_activation(activation):
 
 
 @tf.custom_gradient
-def quantize(x, s, n_bits=8, n_features=1):
+def quantize(x, s, b, n_bits=8, n_features=1):
     
     # STE
 
@@ -57,10 +70,14 @@ def quantize(x, s, n_bits=8, n_features=1):
     q_negative = 2**(n_bits - 1) - 1
     q_positive = tf.cast(q_positive, x.dtype)
     q_negative = tf.cast(q_negative, x.dtype)
-    scaled_x = x / s
+
+
+
+
+    scaled_x = (x - b) / s
     rounded_scaled_x = tf.round(scaled_x)
     quantized_x =  tf.clip_by_value(rounded_scaled_x, -q_negative, q_positive)
-    out = quantized_x * s
+    out = quantized_x * s + b
     
 
     def grad(dy):
@@ -75,32 +92,33 @@ def quantize(x, s, n_bits=8, n_features=1):
         ds = tf.reduce_sum(tf.math.multiply(ds_dy, dy)) / tf.math.sqrt(tf.cast(n_features, q_positive.dtype) * q_positive) * 100 # scale this up
         dy = tf.where(not_oob, dy, 0)
 
-        return dy, ds, None, None
+        return dy, ds, None, None, None
     
     return out, grad
 
 class Quantize(tf.keras.layers.Layer):
-    def __init__(self, n_bits=8, is_kernel=False, need_init=True,**kwargs):
+    def __init__(self, n_bits=8, is_kernel=False, need_init=True, quantize_channels=False, **kwargs):
         super(Quantize, self).__init__(**kwargs)
         self.n_bits = n_bits
         self.is_kernel=is_kernel
         self.need_init = need_init
+        self.quantize_channels = quantize_channels
+        print(self.name, self.quantize_channels, "channels")
+
     
     def build(self, input_shape):
-        self.s = self.add_weight(name='s', shape=[1], initializer=tf.constant_initializer(0.002),
-                                 trainable=True, constraint=tf.keras.constraints.NonNeg())
+        self.s = self.add_weight(name='s', shape=[input_shape[-1]] if self.quantize_channels else [], initializer=tf.constant_initializer(0.002),
+                                    trainable=True, constraint=tf.keras.constraints.NonNeg())
+        print(self.name, self.s.shape, "shape")
     
     def call(self, x):
-        if self.need_init:
-            # use 3 times estimated std dev over 2 ^ (n_bits - 1) as initial s
-            self.s.assign(tf.math.reduce_std(x) * 3 / (2**(self.n_bits - 1)))
-            self.need_init = False
-            return x # no quantization on first call
         n_features = tf.size(x) if self.is_kernel else tf.reduce_prod(tf.shape(x)[1:])
-        return quantize(x, self.s, self.n_bits, n_features)
+
+
+        return quantize(x, self.s, 0.0, self.n_bits, n_features)
 
 class DenseLayer(tf.keras.layers.Layer):
-    def __init__(self, units, activation=None, n_bits=8, use_bias=True, kernel_initializer=None, quantized=False, **kwargs):
+    def __init__(self, units, activation=None, n_bits=8, use_bias=True, kernel_initializer=None, quantized=False, input_quantize=None, use_rep_quant=False, **kwargs):
         super(DenseLayer, self).__init__(**kwargs)
         self.units = units
         self.activation = get_activation(activation)
@@ -108,6 +126,10 @@ class DenseLayer(tf.keras.layers.Layer):
         self.use_bias = use_bias
         self.kernel_initializer = kernel_initializer
         self.quantized=quantized
+        self.input_quantize = input_quantize
+        self.use_rep_quant = use_rep_quant
+        if self.use_rep_quant:
+            assert self.input_quantize is not None, "input_quantize must be provided if use_rep_quant is True"
 
     
     def build(self, input_shape):
@@ -119,7 +141,19 @@ class DenseLayer(tf.keras.layers.Layer):
             self.quantizer = Quantize(n_bits=self.n_bits, name=self.name + '/quantizer', is_kernel=True)
     
     def call(self, x):
-        kernel = self.quantizer(self.kernel) if self.quantized else self.kernel
+        kernel = self.kernel
+        if self.quantized:
+            if self.use_rep_quant:
+                # rep quant migrates the quantization difficulty from the inputs to the kernel
+                # kernel shape is in, out
+                input_step = tf.expand_dims(tf.stop_gradient(self.input_quantize.s), 1)
+                input_step = input_step / tf.reduce_mean(input_step) # for a bit of stability
+
+                kernel = kernel * input_step
+            kernel = self.quantizer(kernel)
+            if self.use_rep_quant:
+                kernel = kernel / input_step
+    
         out = tf.matmul(x, kernel)
         if self.use_bias:
             out = tf.add(out, self.bias)
@@ -147,21 +181,6 @@ class Gating(tf.keras.layers.Layer):
     def call(self, inputs):
         return tf.add(inputs, self.gate) if self.additive else tf.multiply(
             inputs, self.gate)
-
-class StaticAttention(tf.keras.layers.Layer):
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
-
-    def build(self, input_shape):
-        self.logits = self.add_weight(name='logits',
-                                    shape=[64, 64, input_shape[-1]],
-                                    initializer=tf.constant_initializer(0),
-                                    trainable=True)
-
-    def call(self, x):
-        att_map = tf.nn.softmax(self.logits, axis=-1)
-        out = tf.einsum("bic, ioc->boc", x, att_map)
-        return out
 
 
 
@@ -304,7 +323,14 @@ class TFProcess:
 
         # Sparse training
         self.sparse = self.cfg["training"].get("sparse", False)
-        self.quantize = self.cfg["model"].get("quantize", False)
+        quantize = self.cfg["model"].get("quantize", False)
+        self.quantize_activations = self.cfg["model"].get("quantize_activations", quantize) and quantize
+        self.quantize_weights = self.cfg["model"].get("quantize_weights", quantize) and quantize
+        self.quantize_channels = self.cfg["model"].get("quantize_channels", False)
+        self.rep_quant = self.cfg["model"].get("rep_quant", False)
+
+
+        self.quantize_bits = self.cfg["model"].get("quantize_bits", 8)
 
         # Network structure
         self.embedding_size = self.cfg["model"]["embedding_size"]
@@ -320,7 +346,6 @@ class TFProcess:
         self.categorical_value_buckets = self.cfg["model"].get(
             "categorical_value_buckets", 0)
 
-        self.use_static_attention = self.cfg["model"].get("use_static_attention")
 
         self.encoder_dff = self.cfg["model"].get(
             "encoder_dff", (self.embedding_size*1.5)//1)
@@ -750,12 +775,15 @@ class TFProcess:
 
         self.policy_optimism_weights_fn = get_policy_optimism_weights
 
-        def policy_accuracy(target, output):
+        def policy_accuracy(target, output, mask=None):
             target, output = correct_policy(target, output)
-            return tf.reduce_mean(
-                tf.cast(
+            out = tf.cast(
                     tf.equal(tf.argmax(input=target, axis=1),
-                             tf.argmax(input=output, axis=1)), tf.float32))
+                             tf.argmax(input=output, axis=1)), tf.float32)
+            if mask is not None:
+                out = tf.where(mask, out, 0)
+            return tf.reduce_mean(out)
+                
 
         self.policy_accuracy_fn = policy_accuracy
 
@@ -1009,6 +1037,9 @@ class TFProcess:
             Metric("V ST Cat", "Value ST Cat Loss"),
             Metric("P Opp", "Policy Opponent Loss"),
             Metric("P Next", "Policy Next Loss"),
+            Metric("O P Acc", "Opening Policy Accuracy", suffix="%"),
+            Metric("M P Acc", "Middlegame Policy Accuracy", suffix="%"),
+            Metric("E P Acc", "Endgame Policy Accuracy", suffix="%"),
         ]
 
         self.test_metrics.extend(accuracy_thresholded_metrics)
@@ -1595,6 +1626,19 @@ class TFProcess:
         # Policy losses
         policy_loss = self.policy_loss_fn(y, policy)
         policy_accuracy = self.policy_accuracy_fn(y, policy)
+
+
+        major_piece_counts = count_major_pieces(x)
+        endgame_mask = tf.logical_and(tf.math.greater_equal(major_piece_counts, 0), tf.math.less_equal(major_piece_counts, 6))
+        middlegame_mask = tf.logical_and(tf.math.greater_equal(major_piece_counts, 7), tf.math.less_equal(major_piece_counts, 10))
+        opening_mask = tf.logical_and(tf.math.greater_equal(major_piece_counts, 11), tf.math.less_equal(major_piece_counts, 14))
+        # thresholds for early, middle, endgame are 13-14, 7-12, 0-6
+        opening_policy_accuracy = self.policy_accuracy_fn(y, policy, mask=opening_mask)
+
+        middlegame_policy_accuracy = self.policy_accuracy_fn(y, policy, mask=middlegame_mask)
+        endgame_policy_accuracy = self.policy_accuracy_fn(y, policy, mask=endgame_mask)
+
+
         policy_entropy = self.policy_entropy_fn(y, policy)
         policy_ul = self.policy_uniform_loss_fn(y, policy)
         policy_sl = self.policy_search_loss_fn(y, policy)
@@ -1667,6 +1711,9 @@ class TFProcess:
             value_st_cat_loss,
             policy_opponent_loss,
             policy_next_loss,
+            opening_policy_accuracy * 100,
+            middlegame_policy_accuracy * 100,
+            endgame_policy_accuracy * 100,
         ]
 
         metrics.extend([acc * 100 for acc in policy_thresholded_accuracies])
@@ -1881,21 +1928,21 @@ class TFProcess:
         # inputs b, 64, sz
 
         use_bias = not self.omit_qkv_biases
+        use_rep_quant = self.rep_quant
 
-        inputs_ = inputs
 
-        if self.quantize:
-            inputs = Quantize(name=name+"/quantize_1")(inputs)
+        input_quantize = Quantize(name=name+"/quantize_1", n_bits=self.quantize_bits, quantize_channels=self.quantize_channels) if self.quantize_activations else None
+        if input_quantize is not None:
+            inputs = input_quantize(inputs)
+
 
         q = DenseLayer(
-            depth, name=name+"/wq", kernel_initializer="glorot_normal", use_bias=use_bias, quantized=self.quantize)(inputs)
+            depth, name=name+"/wq", kernel_initializer="glorot_normal", use_bias=use_bias, quantized=self.quantize_weights, n_bits=self.quantize_bits, input_quantize=input_quantize, use_rep_quant=use_rep_quant)(inputs)
         k = DenseLayer(
-            depth, name=name+"/wk", kernel_initializer="glorot_normal", use_bias=use_bias, quantized=self.quantize)(inputs)
+            depth, name=name+"/wk", kernel_initializer="glorot_normal", use_bias=use_bias, quantized=self.quantize_weights, n_bits=self.quantize_bits, input_quantize=input_quantize, use_rep_quant=use_rep_quant)(inputs)
         v = DenseLayer(
-            depth, name=name+"/wv", kernel_initializer=initializer, use_bias=use_bias, quantized=self.quantize)(inputs)
+            depth, name=name+"/wv", kernel_initializer=initializer, use_bias=use_bias, quantized=self.quantize_weights, n_bits=self.quantize_bits, input_quantize=input_quantize, use_rep_quant=use_rep_quant)(inputs)
 
-        
-        v_  = v
 
         # split q, k and v into smaller vectors of size "depth" -- one for each head in multi-head attention
         batch_size = tf.shape(q)[0]
@@ -1905,7 +1952,7 @@ class TFProcess:
         v = self.split_heads(v, batch_size, num_heads, head_depth)
 
         scaled_attention, attention_weights = self.scaled_dot_product_attention(
-            q, k, v, name=name, inputs=inputs_)
+            q, k, v, name=name, inputs=inputs)
 
         if num_heads > 1:
             scaled_attention = tf.transpose(scaled_attention,
@@ -1914,18 +1961,14 @@ class TFProcess:
                 scaled_attention,
                 (batch_size, -1, depth))  # concatenate heads
 
-        # final dense layer
-        if self.use_static_attention:
-            static_attention = StaticAttention(name=name+"/static_attention")(v_)
-            scaled_attention = tf.concat([scaled_attention, static_attention], axis=-1)
-        
-        if self.quantize:
-            scaled_attention = Quantize(name=name+"/quantize_2")(scaled_attention)
+        out_quantize =  Quantize(name=name+"/quantize_2", n_bits=self.quantize_bits,
+                                 quantize_channels=False) if self.quantize_activations else None
+        scaled_attention = out_quantize(scaled_attention) if out_quantize is not None else scaled_attention
 
         # output = tf.keras.layers.Dense(
         #     emb_size, name=name + "/dense", kernel_initializer=initializer, use_bias=not self.omit_other_biases)(scaled_attention)
 
-        output = DenseLayer(emb_size, name=name + "/dense", kernel_initializer=initializer, use_bias=not self.omit_other_biases, quantized=self.quantize)(scaled_attention)
+        output = DenseLayer(emb_size, name=name + "/dense", kernel_initializer=initializer, use_bias=not self.omit_other_biases, quantized=self.quantize_weights, n_bits=self.quantize_bits, input_quantize=out_quantize, use_rep_quant=False)(scaled_attention)
         return output, attention_weights
 
     # 2-layer dense feed-forward network in encoder blocks
@@ -1938,21 +1981,25 @@ class TFProcess:
         # dense1 = tf.keras.layers.Dense(
         #     dff, name=name + "/dense1", kernel_initializer=initializer, activation=activation, use_bias=not self.omit_other_biases)(inputs)
 
-                
-        if self.quantize:
-            inputs = Quantize(name=name+"/quantize_1")(inputs)
+        use_rep_quant = self.rep_quant
+
+
+        input_quantize = Quantize(name=name+"/quantize_1", n_bits=self.quantize_bits, quantize_channels=self.quantize_channels) if self.quantize_activations else None
+        if input_quantize is not None:
+            inputs = input_quantize(inputs)
 
         dense1 = DenseLayer(dff, name=name + "/dense1", kernel_initializer=initializer, activation=activation,
-                    use_bias=not self.omit_other_biases, quantized=self.quantize)(inputs)
+                    use_bias=not self.omit_other_biases, quantized=self.quantize_weights, n_bits=self.quantize_bits, input_quantize=input_quantize, use_rep_quant=use_rep_quant)(inputs)
 
         # out = tf.keras.layers.Dense(
         #     emb_size, name=name + "/dense2", kernel_initializer=initializer, use_bias=not self.omit_other_biases)(dense1)
 
-                
-        if self.quantize:
-            dense1 = Quantize(name=name+"/quantize_2")(dense1)
+        out_quantize = Quantize(name=name+"/quantize_2", n_bits=self.quantize_bits, quantize_channels=False) if self.quantize_activations else None
+        if out_quantize is not None:
+            dense1 = out_quantize(dense1)
 
-        out = DenseLayer(emb_size, name=name + "/dense2", kernel_initializer=initializer, use_bias=not self.omit_other_biases, quantized=self.quantize)(dense1)
+        out = DenseLayer(emb_size, name=name + "/dense2", kernel_initializer=initializer, use_bias=not self.omit_other_biases, quantized=self.quantize_weights, n_bits=self.quantize_bits,
+                         input_quantize=out_quantize, use_rep_quant=False)(dense1)
 
         return out
 
