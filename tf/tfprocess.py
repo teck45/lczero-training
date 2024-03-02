@@ -22,7 +22,6 @@ import os
 import tensorflow as tf
 import time
 import bisect
-import lc0_az_policy_map
 import attention_policy_map as apm
 import proto.net_pb2 as pb
 from functools import reduce
@@ -46,6 +45,28 @@ def count_major_pieces(x):
     out = tf.reduce_sum(x[:, :, 1:5], axis=[1,2])
     out += tf.reduce_sum(x[:, :, 7:11], axis=[1,2])
     return out
+
+def static_rpe_map():
+    # 15 * 15 in units for distance pairs to 64 * 64 pairs of squares
+    out = np.zeros((225, 64*64), dtype=float)
+    for i in range(8):
+        for j in range(8):
+            for k in range(8):
+                for l in range(8):
+                    out[15 * (i-k+7) + (j - l + 7), 64 * (i*8+j) + k*8+l] = 1
+    return out
+
+class StaticRPEInitializer(tf.keras.initializers.Initializer):
+    def __init__(self):
+        pass
+
+    def __call__(self, shape, dtype=None, **kwargs):
+        assert len(shape) == 2
+        assert shape[0] == 225
+        assert shape[1] == 64*64
+        return tf.constant(static_rpe_map(), dtype=dtype)
+    
+
 
 def get_activation(activation):
     if isinstance(activation, str) or activation is None:
@@ -98,7 +119,7 @@ def quantize(x, s, b, n_bits=8, n_features=1):
         ds = ds / tf.math.sqrt(tf.cast(n_features, q_positive.dtype) * q_positive) * 100 # scale this up
         dy = tf.where(not_oob, dy, 0)
 
-        return dy, ds, None, None, None
+        return dy, ds, None, None, None 
 
     return out, grad
 
@@ -237,10 +258,16 @@ class ApplyAttentionPolicyMap(tf.keras.layers.Layer):
 
 
 class RPELogits(tf.keras.layers.Layer):
-    def __init__(self, rpe_type=None, **kwargs):
+    def __init__(self, rpe_type=None, rank=None, factorizer=None, **kwargs):
         super(RPELogits, self).__init__(**kwargs)
         assert rpe_type in ['q', 'k']
         self.rpe_type = rpe_type
+        self.factorizer=factorizer
+        if self.factorizer is None:
+            self.rank = 64 * 64
+        else:
+            assert rank is not None
+            self.rank = rank
 
     def build(self, input_shape):
         # 0 h 64 d
@@ -248,35 +275,53 @@ class RPELogits(tf.keras.layers.Layer):
         self.head_depth = input_shape[3]
         self.head_count = input_shape[1]
         self.rpe = self.add_weight(name="rpe",
-                                     shape=[self.head_depth, self.head_count, 64, 64],
+                                     shape=[self.head_depth * self.head_count, self.rank],
                                      initializer="zeros",
                                      trainable=True)
 
     def call(self, x):
+        rpe = self.rpe
+        if self.factorizer is not None:
+            rpe = self.factorizer(self.rpe)
+        rpe = tf.reshape(rpe, [self.head_depth, self.head_count, 64, 64])
+
         if self.rpe_type == 'q':
-            out = tf.einsum('bhqd, dhqk->bhqk', x, self.rpe)
+            out = tf.einsum('bhqd, dhqk->bhqk', x, rpe)
         else:
-            out = tf.einsum('bhkd, dhqk->bhqk', x, self.rpe)
+            out = tf.einsum('bhkd, dhqk->bhqk', x, rpe)
 
         return out
 
 
 class RPEValue(tf.keras.layers.Layer):
-    def __init__(self, head_depth, **kwargs):
+    def __init__(self, head_depth, rank=None, factorizer=None, **kwargs):
         super(RPEValue, self).__init__(**kwargs)
         self.head_depth = head_depth
+        self.factorizer=factorizer
+        if self.factorizer is None:
+            self.rank = 64 * 64
+        else:
+            assert rank is not None
+            self.rank = rank
 
     def build(self, input_shape):
         # 0 h 64 d
 
         self.head_count = input_shape[1]
         self.rpe_value = self.add_weight(name="rpe_value",
-                                     shape=[self.head_depth, self.head_count, 64, 64],
+                                     shape=[self.head_depth * self.head_count, self.rank],
                                      initializer="zeros",
                                      trainable=True)
 
     def call(self, wts):
-        out = tf.einsum('bhqk, dhqk->bhqd', wts, self.rpe_value)
+        rpe_value = self.rpe_value
+
+        if self.factorizer is not None:
+            rpe_value = self.factorizer(self.rpe_value)
+
+        rpe_value = tf.reshape(rpe_value, [self.head_depth, self.head_count, 64, 64])
+
+        out = tf.einsum('bhqk, dhqk->bhqd', wts, rpe_value)
         return out
 
 
@@ -332,14 +377,14 @@ class TFProcess:
 
         # Sparse training
         self.sparse = self.cfg["training"].get("sparse", False)
-        quantize = self.cfg["model"].get("quantize", False)
-        self.quantize_activations = self.cfg["model"].get("quantize_activations", quantize) and quantize
-        self.quantize_weights = self.cfg["model"].get("quantize_weights", quantize) and quantize
+        self.quantize_activations = self.cfg["model"].get("quantize_activations")
+        self.quantize_activation_bits= self.cfg["model"].get("quantize_activation_bits", 8)
+        self.quantize_weight_bits = self.cfg["model"].get("quantize_weight_bits", 8)
+        self.quantize_weights = self.cfg["model"].get("quantize_weights")
         self.quantize_channels = self.cfg["model"].get("quantize_channels", False)
         self.rep_quant = self.cfg["model"].get("rep_quant", False)
 
 
-        self.quantize_bits = self.cfg["model"].get("quantize_bits", 8)
 
         # Network structure
         self.embedding_size = self.cfg["model"]["embedding_size"]
@@ -384,6 +429,12 @@ class TFProcess:
         self.use_rpe_q = self.cfg["model"].get("use_rpe_q", False)
         self.use_rpe_k = self.cfg["model"].get("use_rpe_k", False)
         self.use_rpe_v = self.cfg["model"].get("use_rpe_v", False)
+
+        self.use_factored_rpe = self.cfg["model"].get("factored_rpe", False)
+        self.use_static_rpe = self.cfg["model"].get("static_rpe", False)
+        self.rpe_rank = self.cfg["model"].get("rpe_rank", 256)
+
+        assert not (self.use_factored_rpe and self.use_static_rpe), "Cannot use both factored and static rpe"
 
         self.use_logit_gating = self.cfg["model"].get("use_logit_gating", False)
         assert not (self.use_smolgen and self.use_logit_gating), "Cannot use both smolgen and logit gating"
@@ -1895,10 +1946,11 @@ class TFProcess:
         heads = q.shape[1]
 
 
+
         if self.use_rpe_q:
-            matmul_qk = matmul_qk + RPELogits(name=name+"/rpe_q", rpe_type='q')(q)
+            matmul_qk = matmul_qk + RPELogits(name=name+"/rpe_q", rpe_type='q', factorizer=self.rpe_factorizers.get('q'), rank=self.rpe_rank  )(q)
         if self.use_rpe_k:
-            matmul_qk = matmul_qk + RPELogits(name=name+"/rpe_k", rpe_type='k')(k)
+            matmul_qk = matmul_qk + RPELogits(name=name+"/rpe_k", rpe_type='k', factorizer=self.rpe_factorizers.get('k'), rank=self.rpe_rank )(k)
 
 
         scaled_attention_logits = matmul_qk / tf.math.sqrt(dk)
@@ -1920,7 +1972,7 @@ class TFProcess:
 
         if self.use_rpe_v:
             head_depth = v.shape[-1]
-            output = output + RPEValue(head_depth, name=name+'/rpe_v')(attention_weights)
+            output = output + RPEValue(head_depth, name=name+'/rpe_v', factorizer=self.rpe_factorizers.get('v'), rank=self.rpe_rank   )(attention_weights)
 
         # output shape = (b, h, 64, d)
 
@@ -1940,17 +1992,17 @@ class TFProcess:
         use_rep_quant = self.rep_quant
 
 
-        input_quantize = Quantize(name=name+"/quantize_1", n_bits=self.quantize_bits, quantize_channels=self.quantize_channels) if self.quantize_activations else None
+        input_quantize = Quantize(name=name+"/quantize_1", n_bits=self.quantize_activation_bits, quantize_channels=self.quantize_channels) if self.quantize_activations else None
         if input_quantize is not None:
             inputs = input_quantize(inputs)
 
 
         q = DenseLayer(
-            depth, name=name+"/wq", kernel_initializer="glorot_normal", use_bias=use_bias, quantized=self.quantize_weights, n_bits=self.quantize_bits, input_quantize=input_quantize, use_rep_quant=use_rep_quant)(inputs)
+            depth, name=name+"/wq", kernel_initializer="glorot_normal", use_bias=use_bias, quantized=self.quantize_weights, n_bits=self.quantize_weight_bits, input_quantize=input_quantize, use_rep_quant=use_rep_quant)(inputs)
         k = DenseLayer(
-            depth, name=name+"/wk", kernel_initializer="glorot_normal", use_bias=use_bias, quantized=self.quantize_weights, n_bits=self.quantize_bits, input_quantize=input_quantize, use_rep_quant=use_rep_quant)(inputs)
+            depth, name=name+"/wk", kernel_initializer="glorot_normal", use_bias=use_bias, quantized=self.quantize_weights, n_bits=self.quantize_weight_bits, input_quantize=input_quantize, use_rep_quant=use_rep_quant)(inputs)
         v = DenseLayer(
-            depth, name=name+"/wv", kernel_initializer=initializer, use_bias=use_bias, quantized=self.quantize_weights, n_bits=self.quantize_bits, input_quantize=input_quantize, use_rep_quant=use_rep_quant)(inputs)
+            depth, name=name+"/wv", kernel_initializer=initializer, use_bias=use_bias, quantized=self.quantize_weights, n_bits=self.quantize_weight_bits, input_quantize=input_quantize, use_rep_quant=use_rep_quant)(inputs)
 
 
         # split q, k and v into smaller vectors of size "depth" -- one for each head in multi-head attention
@@ -1970,14 +2022,14 @@ class TFProcess:
                 scaled_attention,
                 (batch_size, -1, depth))  # concatenate heads
 
-        out_quantize =  Quantize(name=name+"/quantize_2", n_bits=self.quantize_bits,
+        out_quantize =  Quantize(name=name+"/quantize_2", n_bits=self.quantize_activation_bits,
                                  quantize_channels=False) if self.quantize_activations else None
         scaled_attention = out_quantize(scaled_attention) if out_quantize is not None else scaled_attention
 
         # output = tf.keras.layers.Dense(
         #     emb_size, name=name + "/dense", kernel_initializer=initializer, use_bias=not self.omit_other_biases)(scaled_attention)
 
-        output = DenseLayer(emb_size, name=name + "/dense", kernel_initializer=initializer, use_bias=not self.omit_other_biases, quantized=self.quantize_weights, n_bits=self.quantize_bits, input_quantize=out_quantize, use_rep_quant=False)(scaled_attention)
+        output = DenseLayer(emb_size, name=name + "/dense", kernel_initializer=initializer, use_bias=not self.omit_other_biases, quantized=self.quantize_weights, n_bits=self.quantize_weight_bits, input_quantize=out_quantize, use_rep_quant=False)(scaled_attention)
         return output, attention_weights
 
     # 2-layer dense feed-forward network in encoder blocks
@@ -1993,21 +2045,21 @@ class TFProcess:
         use_rep_quant = self.rep_quant
 
 
-        input_quantize = Quantize(name=name+"/quantize_1", n_bits=self.quantize_bits, quantize_channels=self.quantize_channels) if self.quantize_activations else None
+        input_quantize = Quantize(name=name+"/quantize_1", n_bits=self.quantize_activation_bits, quantize_channels=self.quantize_channels) if self.quantize_activations else None
         if input_quantize is not None:
             inputs = input_quantize(inputs)
 
         dense1 = DenseLayer(dff, name=name + "/dense1", kernel_initializer=initializer, activation=activation,
-                    use_bias=not self.omit_other_biases, quantized=self.quantize_weights, n_bits=self.quantize_bits, input_quantize=input_quantize, use_rep_quant=use_rep_quant)(inputs)
+                    use_bias=not self.omit_other_biases, quantized=self.quantize_weights, n_bits=self.quantize_weight_bits, input_quantize=input_quantize, use_rep_quant=use_rep_quant)(inputs)
 
         # out = tf.keras.layers.Dense(
         #     emb_size, name=name + "/dense2", kernel_initializer=initializer, use_bias=not self.omit_other_biases)(dense1)
 
-        out_quantize = Quantize(name=name+"/quantize_2", n_bits=self.quantize_bits, quantize_channels=False) if self.quantize_activations else None
+        out_quantize = Quantize(name=name+"/quantize_2", n_bits=self.quantize_activation_bits, quantize_channels=False) if self.quantize_activations else None
         if out_quantize is not None:
             dense1 = out_quantize(dense1)
 
-        out = DenseLayer(emb_size, name=name + "/dense2", kernel_initializer=initializer, use_bias=not self.omit_other_biases, quantized=self.quantize_weights, n_bits=self.quantize_bits,
+        out = DenseLayer(emb_size, name=name + "/dense2", kernel_initializer=initializer, use_bias=not self.omit_other_biases, quantized=self.quantize_weight_bits, n_bits=self.quantize_weight_bits,
                          input_quantize=out_quantize, use_rep_quant=False)(dense1)
 
         return out
@@ -2015,7 +2067,7 @@ class TFProcess:
     def encoder_layer(self, inputs, emb_size: int, d_model: int, num_heads: int, dff: int, name: str, training: bool):
         # DeepNorm
         alpha = tf.cast(tf.math.pow(
-            2. * self.encoder_layers, 0.25), self.model_dtype)
+            2. * self.encoder_layers, -0.25), self.model_dtype)
         beta = tf.cast(tf.math.pow(
             8. * self.encoder_layers, -0.25), self.model_dtype)
 
@@ -2032,7 +2084,7 @@ class TFProcess:
             self.dropout_rate, name=name + "/dropout1")(attn_output, training=training)
 
         # skip connection + layernorm
-        out1 = alpha * inputs + attn_output
+        out1 = inputs + attn_output * alpha
         # out1 = inputs
         if not self.skip_first_ln:
             out1 = self.encoder_norm(
@@ -2044,7 +2096,7 @@ class TFProcess:
         ffn_output = tf.keras.layers.Dropout(
             self.dropout_rate, name=name + "/dropout2")(ffn_output, training=training)
 
-        out2 = alpha * out1 + ffn_output
+        out2 = out1 + ffn_output * alpha
 
         out2 = self.encoder_norm(
             name=name+"/ln2")(out2)
@@ -2077,6 +2129,23 @@ class TFProcess:
         if self.use_smolgen:
             self.smol_weight_gen_dense = tf.keras.layers.Dense(
                 64 * 64, name=name+"smol_weight_gen", use_bias=False)
+        
+        self.rpe_factorizers = {}
+        if self.use_factored_rpe or self.use_static_rpe:
+            initializer=StaticRPEInitializer() if self.use_static_rpe else "glorot_normal"
+            trainable = not self.use_static_rpe
+            # A "full" rpe has 4096xc parameters, which is enormous, so we factor the rpe matrices
+            if self.use_rpe_q:
+                self.rpe_factorizers["q"] = tf.keras.layers.Dense(
+                    64 * 64, name=name+"rpe_q_factorizer", kernel_initializer=initializer, use_bias=False, trainable=trainable)
+            if self.use_rpe_k:
+                self.rpe_factorizers["k"] = tf.keras.layers.Dense(
+                    64 * 64, name=name+"rpe_k_factorizer", kernel_initializer=initializer, use_bias=False, trainable=trainable)
+            if self.use_rpe_v:
+                self.rpe_factorizers["v"] = tf.keras.layers.Dense(
+                    64 * 64, name=name+"rpe_v_factorizer", kernel_initializer=initializer, use_bias=False, trainable=trainable)
+
+
 
         if self.embedding_style == "new":
             inputs = tf.cast(inputs, self.model_dtype)
@@ -2102,7 +2171,7 @@ class TFProcess:
 
             # DeepNorm
             alpha = tf.cast(tf.math.pow(
-                2. * self.encoder_layers, 0.25), self.model_dtype)
+                2. * self.encoder_layers, -0.25), self.model_dtype)
             beta = tf.cast(tf.math.pow(
                 8. * self.encoder_layers, -0.25), self.model_dtype)
 
@@ -2118,7 +2187,7 @@ class TFProcess:
 
 
             flow = self.encoder_norm(
-                name=name+"embedding/ffn_ln")(alpha * flow + ffn_output)
+                name=name+"embedding/ffn_ln")(flow + ffn_output * alpha)
 
         elif self.embedding_style == "old":
             flow = tf.transpose(inputs, perm=[0, 2, 3, 1])
