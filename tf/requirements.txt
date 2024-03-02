@@ -1,6 +1,6 @@
+tensorflow[and-cuda]==2.15
 numpy
 protobuf
 pyyaml
 rich
-tensorflow-addons
-tensorflow[and-cuda]==2.14
+tf-models-official
