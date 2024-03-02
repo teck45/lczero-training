@@ -96,8 +96,8 @@ def quantize(x, s, b, n_bits=8, n_features=1):
     per_channel = (s.shape[0] != 1)
 
 
-
-
+    b = tf.cast(b, x.dtype)
+    
     scaled_x = (x - b) / (s + 1e-5)
     rounded_scaled_x = tf.round(scaled_x)
     quantized_x =  tf.clip_by_value(rounded_scaled_x, -q_negative, q_positive)
@@ -377,10 +377,10 @@ class TFProcess:
 
         # Sparse training
         self.sparse = self.cfg["training"].get("sparse", False)
-        self.quantize_activations = self.cfg["model"].get("quantize_activations")
+        self.quantize_activations = self.cfg["model"].get("quantize_activations", False)
         self.quantize_activation_bits= self.cfg["model"].get("quantize_activation_bits", 8)
         self.quantize_weight_bits = self.cfg["model"].get("quantize_weight_bits", 8)
-        self.quantize_weights = self.cfg["model"].get("quantize_weights")
+        self.quantize_weights = self.cfg["model"].get("quantize_weights", False)
         self.quantize_channels = self.cfg["model"].get("quantize_channels", False)
         self.rep_quant = self.cfg["model"].get("rep_quant", False)
 
@@ -2059,7 +2059,7 @@ class TFProcess:
         if out_quantize is not None:
             dense1 = out_quantize(dense1)
 
-        out = DenseLayer(emb_size, name=name + "/dense2", kernel_initializer=initializer, use_bias=not self.omit_other_biases, quantized=self.quantize_weight_bits, n_bits=self.quantize_weight_bits,
+        out = DenseLayer(emb_size, name=name + "/dense2", kernel_initializer=initializer, use_bias=not self.omit_other_biases, quantized=self.quantize_weights, n_bits=self.quantize_weight_bits,
                          input_quantize=out_quantize, use_rep_quant=False)(dense1)
 
         return out
