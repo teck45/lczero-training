@@ -1,20 +1,25 @@
 %YAML 1.2
 --- 
-name: 'example'
-gpu:  0
+name: "8x256-256"
+gpu: 0
 dataset:
   num_chunks: 500_000_000
   allow_less_chunks: true
   train_ratio: 0.95
+  sort_type: name
   input_train: 
-    - '/mnt/trainingdata-rescored/rescored-data/training-run1-test80-202309*/'
+    - '/mnt/t82data/training-run1-test80-202309*/'
   input_test:
-    - "/mnt/trainingdata-rescored/test-data/training-run1-test80-20230616-0117.tar/"
+    - '/mnt/testdata/*/'
+  # input_validation:
+  # #  - '/mnt/data/validation-rescored/'
   train_workers: 8
   test_workers: 4
   fast_chunk_loading: false
+  # pc_min: 0
+  # pc_max: 6
 training:
-    precision: single 
+    precision: half 
     swa: false
     swa_output: false  
     swa_max_n: 10
@@ -32,22 +37,22 @@ training:
     disable_pb_checkpointing: true
     # validation_steps: 5000
     num_test_positions: 131_072
-    train_avg_report_steps: 100
-    total_steps: 2_000_000
-    checkpoint_steps: 1_000_000
+    train_avg_report_steps: 1_000
+    total_steps: 3_000_000
+    checkpoint_steps: 100_000
     shuffle_size: 2_000_000
     warmup_steps: 1000
     mask_legal_moves: true
     lr_values: 
-        - 0.00015
-        - 0.0001264
-        - 0.00004
+        - 0.001
+        - 0.000316
+        - 0.0001
     lr_boundaries:
-        - 1_600_000
-        - 1_800_000
+        - 2_400_000
+        - 2_700_000
     loss_weights:
         policy: 1.0
-        policy_optimistic_st: 1.0
+        policy_optimistic_st: 0.0
         policy_soft: 8.0 # loss is much smaller at optimum
         policy_opponent: 0.00
         policy_next: 0.00
@@ -71,17 +76,19 @@ training:
     return_attn_wts: false
 
 model:
-    embedding_size: 128
-    policy_embedding_size: 128
-    value_embedding_size: 128
+
+    # Dimension parameters
+    embedding_size: 256
+    policy_embedding_size: 256
+    value_embedding_size: 32
     moves_left_embedding_size: 32
-    encoder_layers: 5                   # number of intermediate attention layers in the policy head
-    encoder_heads: 4                    # number of attention heads in encoder layers, emb // (32 or 64) recommended
+    encoder_layers: 8                   # number of intermediate attention layers in the policy head
+    encoder_heads: 8                    # number of attention heads in encoder layers, emb // (32 or 64) recommended
                                          # with 64 memory is same as embedding, with 32 is double
-    encoder_d_model: 128                 # size of the Q, K, & V vectors in encoder layers -- divisible by encoder_heads
-    encoder_dff: 128                    # size of the expansion layer in encoder layer ffn
-    policy_d_model: 128                  # size of the query and key vectors in final attention layer
-    policy_d_aux: 128                     # size of the query and key vectors for auxiliary layers
+    encoder_d_model: 256                 # size of the Q, K, & V vectors in encoder layers -- divisible by encoder_heads
+    encoder_dff: 256                    # size of the expansion layer in encoder layer ffn
+    policy_d_model: 256                  # size of the query and key vectors in final attention layer
+    policy_d_aux: 256                     # size of the query and key vectors for auxiliary layers
     dropout_rate: 0.0                    # the dropout rate used for weight regularization of attention during training
                                         # makes memory 33 -> 39 GB on A100 as observed by Teck and Kovax
 
@@ -92,31 +99,42 @@ model:
     moves_left: 'v1'
     input_type: 'classic'
 
+    # Smolgen
     use_smolgen: false
     smolgen_hidden_channels: 16
     smolgen_hidden_sz: 64
     smolgen_gen_sz: 64
     smolgen_activation: 'swish'
 
+    # RPE
+    use_rpe_q: true
+    use_rpe_k: true
+    use_rpe_v: true
+    factored_rpe: false 
+    static_rpe: true
+    rpe_rank: 512
+
+    # Gating
     use_logit_gating: false
 
+    # Ablations
     omit_qkv_biases: true # these two increases training speed by ~10% on BT4 
     encoder_rms_norm: true # without quality degradation
 
-    policy_optimistic_st: true
+    # Output heads
+    policy_optimistic_st: false
     policy_opponent: false
     policy_next: false
     value_st: true
     value_q: true
     soft_policy: true
     categorical_value_buckets: 32
-
-    quantize: true
-
-    use_rpe_q: false
-    use_rpe_k: false
-    use_rpe_v: false
-
-
-
     soft_policy_temperature: 4.0
+
+    # quantization
+    quantize_activations: false
+    quantize_weights: false
+    quantize_activation_bits: 8
+    quantize_weight_bits: 8
+    quantize_channels: false
+    rep_quant: false

@@ -62,6 +62,7 @@ class StaticRPEInitializer(tf.keras.initializers.Initializer):
 
     def __call__(self, shape, dtype=None, **kwargs):
         assert len(shape) == 2
+        print(shape)
         assert shape[0] == 225
         assert shape[1] == 64*64
         return tf.constant(static_rpe_map(), dtype=dtype)
@@ -116,7 +117,7 @@ def quantize(x, s, b, n_bits=8, n_features=1):
         n_dims = len(dy.shape)
         axes = range(n_dims - 1) if per_channel else range(n_dims)
         ds = tf.reduce_sum(tf.math.multiply(ds_dy, dy), axis=list(axes)) 
-        ds = ds / tf.math.sqrt(tf.cast(n_features, q_positive.dtype) * q_positive) * 100 # scale this up
+        ds = ds / tf.math.sqrt(tf.cast(n_features, q_positive.dtype) * q_positive) # scale this up
         dy = tf.where(not_oob, dy, 0)
 
         return dy, ds, None, None, None 
@@ -129,7 +130,7 @@ class Quantize(tf.keras.layers.Layer):
         self.n_bits = n_bits
         self.is_kernel=is_kernel
         self.need_init = need_init
-        self.quantize_channels = quantize_channels
+        self.quantize_channels = quantize_channels or is_kernel
         print(self.name, self.quantize_channels, "channels")
 
 
@@ -433,6 +434,8 @@ class TFProcess:
         self.use_factored_rpe = self.cfg["model"].get("factored_rpe", False)
         self.use_static_rpe = self.cfg["model"].get("static_rpe", False)
         self.rpe_rank = self.cfg["model"].get("rpe_rank", 256)
+        if self.use_static_rpe:
+            self.rpe_rank = 225
 
         assert not (self.use_factored_rpe and self.use_static_rpe), "Cannot use both factored and static rpe"
 
@@ -1204,7 +1207,6 @@ class TFProcess:
                 # new_weight = tf.constant(new_weight, shape=shape)
                 # weight.assign(tf.transpose(a=new_weight, perm=[2, 3, 1, 0]))
                 new_weight = tf.constant(new_weight, shape=weight.shape)
-                weight.assign(new_weight)
             elif weight.shape.ndims == 2:
                 # Fully connected layers are [in, out] in TF
                 #
@@ -1213,11 +1215,14 @@ class TFProcess:
                 s = weight.shape.as_list()
                 shape = [s[i] for i in [1, 0]]
                 new_weight = tf.constant(new_weight, shape=shape)
-                weight.assign(tf.transpose(a=new_weight, perm=[1, 0]))
+                new_weight = tf.transpose(a=new_weight, perm=[1, 0])
             else:
                 # Biases, batchnorm etc
                 new_weight = tf.constant(new_weight, shape=weight.shape)
-                weight.assign(new_weight)
+            
+            new_weight = tf.broadcast_to(new_weight, weight.shape)
+            weight.assign(new_weight)
+            
         # Replace the SWA weights as well, ensuring swa accumulation is reset.
         if self.swa_enabled:
             self.swa_count.assign(tf.constant(0.))
@@ -1275,10 +1280,20 @@ class TFProcess:
             with self.progressbar:
                 self.progresstask = self.progressbar.add_task(
                     f"[green]Doing {total_steps} training steps", total=total_steps)
-                loop()
+                try:
+                    loop()
+                except tf.errors.ResourceExhaustedError as e:
+                    steps = self.global_step.read_value()
+                    evaled_steps = steps.numpy()
+                    self.manager.save(checkpoint_number=evaled_steps)
+                    print("Model saved in file: {}".format(
+                        self.manager.latest_checkpoint))
+                    exit()
+
         else:
             print("Warning, rich module not found, disabling progress bar")
             loop()
+
 
     @tf.function()
     def read_weights(self):
@@ -1621,27 +1636,12 @@ class TFProcess:
                 print("Model saved in file: {}".format(
                     self.manager.latest_checkpoint))
 
-                # Save normal weights
-                tf.saved_model.save(self.model, os.path.join(
-                    self.root_dir, self.cfg["name"]) + str(evaled_steps))
-
-                # Save swa weights
-                if self.swa_enabled:
-                    backup = self.read_weights()
-                    for (swa, w) in zip(self.swa_weights, self.model.weights):
-                        w.assign(swa.read_value())
-                    evaled_steps = steps.numpy()
-                    tf.saved_model.save(self.model, os.path.join(
-                        self.root_dir, self.cfg["name"]) + "-swa-" + str(evaled_steps))
-                    for (old, w) in zip(backup, self.model.weights):
-                        w.assign(old)
-
                 if not self.cfg["training"].get("disable_pb_checkpointing"):
                     path = os.path.join(self.root_dir, self.cfg["name"])
                     leela_path = path + "-" + str(evaled_steps)
                     swa_path = path + "-swa-" + str(evaled_steps)
                     self.net.pb.training_params.training_steps = evaled_steps
-                    self.save_leelaz_weights(leela_path)
+                    #self.save_leelaz_weights(leela_path)
                     if self.swa_enabled:
                         self.save_swa_weights(swa_path)
 
@@ -2132,18 +2132,18 @@ class TFProcess:
         
         self.rpe_factorizers = {}
         if self.use_factored_rpe or self.use_static_rpe:
-            initializer=StaticRPEInitializer() if self.use_static_rpe else "glorot_normal"
+            rpe_initializer=StaticRPEInitializer() if self.use_static_rpe else "glorot_normal"
             trainable = not self.use_static_rpe
             # A "full" rpe has 4096xc parameters, which is enormous, so we factor the rpe matrices
             if self.use_rpe_q:
                 self.rpe_factorizers["q"] = tf.keras.layers.Dense(
-                    64 * 64, name=name+"rpe_q_factorizer", kernel_initializer=initializer, use_bias=False, trainable=trainable)
+                    64 * 64, name=name+"rpe_q_factorizer", kernel_initializer=rpe_initializer, use_bias=False, trainable=trainable)
             if self.use_rpe_k:
                 self.rpe_factorizers["k"] = tf.keras.layers.Dense(
-                    64 * 64, name=name+"rpe_k_factorizer", kernel_initializer=initializer, use_bias=False, trainable=trainable)
+                    64 * 64, name=name+"rpe_k_factorizer", kernel_initializer=rpe_initializer, use_bias=False, trainable=trainable)
             if self.use_rpe_v:
                 self.rpe_factorizers["v"] = tf.keras.layers.Dense(
-                    64 * 64, name=name+"rpe_v_factorizer", kernel_initializer=initializer, use_bias=False, trainable=trainable)
+                    64 * 64, name=name+"rpe_v_factorizer", kernel_initializer=rpe_initializer, use_bias=False, trainable=trainable)
 
 
 
@@ -2466,4 +2466,5 @@ class TFProcess:
             if layer.name in self.sparsity_patterns:
                 kernel = layer.kernel
                 kernel.assign(kernel * self.sparsity_patterns[layer.name])
+
 
