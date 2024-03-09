@@ -404,6 +404,7 @@ class TFProcess:
 
         self.encoder_dff = self.cfg["model"].get(
             "encoder_dff", (self.embedding_size*1.5)//1)
+        self.glu = self.cfg["model"].get("glu")
         self.policy_d_model = self.cfg["model"].get(
             "policy_d_model", self.embedding_size)
         self.dropout_rate = self.cfg["model"].get("dropout_rate", 0.0)
@@ -2033,11 +2034,14 @@ class TFProcess:
         return output, attention_weights
 
     # 2-layer dense feed-forward network in encoder blocks
-    def ffn(self, inputs, emb_size: int, dff: int, initializer, name: str):
-        if isinstance(self.ffn_activation, str):
+    def ffn(self, inputs, emb_size: int, dff: int, initializer, name: str, glu=False):
+        if glu:
+            activation = tf.keras.activations.get("swish")
+        elif isinstance(self.ffn_activation, str):
             activation = tf.keras.activations.get(self.ffn_activation)
         else:
             activation = self.ffn_activation
+        
 
         # dense1 = tf.keras.layers.Dense(
         #     dff, name=name + "/dense1", kernel_initializer=initializer, activation=activation, use_bias=not self.omit_other_biases)(inputs)
@@ -2051,6 +2055,12 @@ class TFProcess:
 
         dense1 = DenseLayer(dff, name=name + "/dense1", kernel_initializer=initializer, activation=activation,
                     use_bias=not self.omit_other_biases, quantized=self.quantize_weights, n_bits=self.quantize_weight_bits, input_quantize=input_quantize, use_rep_quant=use_rep_quant)(inputs)
+
+        if glu:
+            dense3 = DenseLayer(dff, name=name + "/dense3", kernel_initializer=initializer,
+                    use_bias=not self.omit_other_biases, quantized=self.quantize_weights, n_bits=self.quantize_weight_bits, input_quantize=input_quantize, use_rep_quant=use_rep_quant)(inputs)
+
+            dense1 = dense1 * dense3
 
         # out = tf.keras.layers.Dense(
         #     emb_size, name=name + "/dense2", kernel_initializer=initializer, use_bias=not self.omit_other_biases)(dense1)
@@ -2092,7 +2102,7 @@ class TFProcess:
 
         # feed-forward network
         ffn_output = self.ffn(out1, emb_size, dff,
-                              xavier_norm, name=name + "/ffn")
+                              xavier_norm, name=name + "/ffn", glu=self.glu)
         ffn_output = tf.keras.layers.Dropout(
             self.dropout_rate, name=name + "/dropout2")(ffn_output, training=training)
 
@@ -2466,5 +2476,4 @@ class TFProcess:
             if layer.name in self.sparsity_patterns:
                 kernel = layer.kernel
                 kernel.assign(kernel * self.sparsity_patterns[layer.name])
-
 
