@@ -111,9 +111,6 @@ model:
     use_rpe_q: true
     use_rpe_k: true
     use_rpe_v: true
-    factored_rpe: false 
-    static_rpe: true
-    rpe_rank: 512
 
     # Gating
     use_logit_gating: false

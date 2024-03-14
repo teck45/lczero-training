@@ -53,7 +53,7 @@ def count_major_pieces(x):
     out += tf.reduce_sum(x[:, :, 7:11], axis=[1,2])
     return out
 
-def static_rpe_map():
+def make_rpe_map():
     # 15 * 15 in units for distance pairs to 64 * 64 pairs of squares
     out = np.zeros((225, 64*64), dtype=float)
     for i in range(8):
@@ -63,16 +63,8 @@ def static_rpe_map():
                     out[15 * (i-k+7) + (j - l + 7), 64 * (i*8+j) + k*8+l] = 1
     return out
 
-class StaticRPEInitializer(tf.keras.initializers.Initializer):
-    def __init__(self):
-        pass
+rpe_map = make_rpe_map()
 
-    def __call__(self, shape, dtype=None, **kwargs):
-        assert len(shape) == 2
-        print(shape)
-        assert shape[0] == 225
-        assert shape[1] == 64*64
-        return tf.constant(static_rpe_map(), dtype=dtype)
     
 
 
@@ -266,16 +258,11 @@ class ApplyAttentionPolicyMap(tf.keras.layers.Layer):
 
 
 class RPELogits(tf.keras.layers.Layer):
-    def __init__(self, rpe_type=None, rank=None, factorizer=None, **kwargs):
+    rpe_factorizer = tf.constant(rpe_map, dtype=tf.float32)
+    def __init__(self, rpe_type=None, **kwargs):
         super(RPELogits, self).__init__(**kwargs)
         assert rpe_type in ['q', 'k']
         self.rpe_type = rpe_type
-        self.factorizer=factorizer
-        if self.factorizer is None:
-            self.rank = 64 * 64
-        else:
-            assert rank is not None
-            self.rank = rank
 
     def build(self, input_shape):
         # 0 h 64 d
@@ -283,14 +270,12 @@ class RPELogits(tf.keras.layers.Layer):
         self.head_depth = input_shape[3]
         self.head_count = input_shape[1]
         self.rpe = self.add_weight(name="rpe",
-                                     shape=[self.head_depth * self.head_count, self.rank],
+                                     shape=[self.head_depth * self.head_count, 15*15],
                                      initializer="zeros",
                                      trainable=True)
 
     def call(self, x):
-        rpe = self.rpe
-        if self.factorizer is not None:
-            rpe = self.factorizer(self.rpe)
+        rpe = self.rpe @ tf.cast(self.rpe_factorizer, self.rpe.dtype)
         rpe = tf.reshape(rpe, [self.head_depth, self.head_count, 64, 64])
 
         if self.rpe_type == 'q':
@@ -300,17 +285,16 @@ class RPELogits(tf.keras.layers.Layer):
 
         return out
 
+    def get_config(self):
+        config = super(RPELogits, self).get_config()
+        config.update({'rpe_type': self.rpe_type})
+        return config
 
 class RPEValue(tf.keras.layers.Layer):
-    def __init__(self, head_depth, rank=None, factorizer=None, **kwargs):
+    rpe_factorizer = tf.constant(rpe_map, dtype=tf.float32)
+    def __init__(self, head_depth,  **kwargs):
         super(RPEValue, self).__init__(**kwargs)
         self.head_depth = head_depth
-        self.factorizer=factorizer
-        if self.factorizer is None:
-            self.rank = 64 * 64
-        else:
-            assert rank is not None
-            self.rank = rank
 
     def build(self, input_shape):
         # 0 h 64 d
@@ -322,10 +306,7 @@ class RPEValue(tf.keras.layers.Layer):
                                      trainable=True)
 
     def call(self, wts):
-        rpe_value = self.rpe_value
-
-        if self.factorizer is not None:
-            rpe_value = self.factorizer(self.rpe_value)
+        rpe_value = self.rpe_value @ tf.cast(self.rpe_factorizer, self.rpe_value.dtype)
 
         rpe_value = tf.reshape(rpe_value, [self.head_depth, self.head_count, 64, 64])
 
@@ -439,13 +420,6 @@ class TFProcess:
         self.use_rpe_k = self.cfg["model"].get("use_rpe_k", False)
         self.use_rpe_v = self.cfg["model"].get("use_rpe_v", False)
 
-        self.use_factored_rpe = self.cfg["model"].get("factored_rpe", False)
-        self.use_static_rpe = self.cfg["model"].get("static_rpe", False)
-        self.rpe_rank = self.cfg["model"].get("rpe_rank", 256)
-        if self.use_static_rpe:
-            self.rpe_rank = 225
-
-        assert not (self.use_factored_rpe and self.use_static_rpe), "Cannot use both factored and static rpe"
 
         self.use_logit_gating = self.cfg["model"].get("use_logit_gating", False)
         assert not (self.use_smolgen and self.use_logit_gating), "Cannot use both smolgen and logit gating"
@@ -1956,9 +1930,9 @@ class TFProcess:
 
 
         if self.use_rpe_q:
-            matmul_qk = matmul_qk + RPELogits(name=name+"/rpe_q", rpe_type='q', factorizer=self.rpe_factorizers.get('q'), rank=self.rpe_rank  )(q)
+            matmul_qk = matmul_qk + RPELogits(name=name+"/rpe_q", rpe_type='q')(q)
         if self.use_rpe_k:
-            matmul_qk = matmul_qk + RPELogits(name=name+"/rpe_k", rpe_type='k', factorizer=self.rpe_factorizers.get('k'), rank=self.rpe_rank )(k)
+            matmul_qk = matmul_qk + RPELogits(name=name+"/rpe_k", rpe_type='k')(k)
 
 
         scaled_attention_logits = matmul_qk / tf.math.sqrt(dk)
@@ -1980,7 +1954,7 @@ class TFProcess:
 
         if self.use_rpe_v:
             head_depth = v.shape[-1]
-            output = output + RPEValue(head_depth, name=name+'/rpe_v', factorizer=self.rpe_factorizers.get('v'), rank=self.rpe_rank   )(attention_weights)
+            output = output + RPEValue(head_depth, name=name+'/rpe_v')(attention_weights)
 
         # output shape = (b, h, 64, d)
 
@@ -2159,22 +2133,6 @@ class TFProcess:
             self.smol_weight_gen_dense = tf.keras.layers.Dense(
                 64 * 64, name=name+"smol_weight_gen", use_bias=False)
         
-        self.rpe_factorizers = {}
-        if self.use_factored_rpe or self.use_static_rpe:
-            rpe_initializer=StaticRPEInitializer() if self.use_static_rpe else "glorot_normal"
-            trainable = not self.use_static_rpe
-            # A "full" rpe has 4096xc parameters, which is enormous, so we factor the rpe matrices
-            if self.use_rpe_q:
-                self.rpe_factorizers["q"] = tf.keras.layers.Dense(
-                    64 * 64, name=name+"rpe_q_factorizer", kernel_initializer=rpe_initializer, use_bias=False, trainable=trainable)
-            if self.use_rpe_k:
-                self.rpe_factorizers["k"] = tf.keras.layers.Dense(
-                    64 * 64, name=name+"rpe_k_factorizer", kernel_initializer=rpe_initializer, use_bias=False, trainable=trainable)
-            if self.use_rpe_v:
-                self.rpe_factorizers["v"] = tf.keras.layers.Dense(
-                    64 * 64, name=name+"rpe_v_factorizer", kernel_initializer=rpe_initializer, use_bias=False, trainable=trainable)
-
-
 
         if self.embedding_style == "new":
             inputs = tf.cast(inputs, self.model_dtype)
