@@ -1361,7 +1361,7 @@ class TFProcess:
 
             # Value losses
             value_winner_loss, value_winner_err_loss, value_winner_cat_loss = self.value_losses_fn(
-                z, value_winner, None, None)
+                z, value_winner)
             value_q_loss, value_q_err_loss, value_q_cat_loss = self.value_losses_fn(
                 q, value_q, value_q_err, value_q_cat) if value_q is not None else (tf.constant(0.), tf.constant(0.), tf.constant(0.))
             value_st_loss, value_st_err_loss, value_st_cat_loss = self.value_losses_fn(
@@ -1735,7 +1735,7 @@ class TFProcess:
 
         # Value losses
         value_winner_loss, value_winner_err_loss, value_winner_cat_loss = self.value_losses_fn(
-            z, value_winner, value_winner)
+            z, value_winner)
 
         value_q_loss, value_q_err_loss, value_q_cat_loss = self.value_losses_fn(
             q, value_q, value_q_err, value_q_cat) if value_q is not None else (tf.constant(0.),) * 3
