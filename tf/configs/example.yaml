@@ -74,6 +74,7 @@ training:
     sparse: false
 
     return_attn_wts: false
+    return_activations: false
 
 model:
 

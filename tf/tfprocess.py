@@ -2121,9 +2121,9 @@ class TFProcess:
         activations[name + "/ln1"] = out1
 
         # feed-forward network
-        ffn_output = self.ffn(out1, emb_size, dff,
+        ffn_output, activations_ffn = self.ffn(out1, emb_size, dff,
                               xavier_norm, name=name + "/ffn", glu=self.glu)
-        ffn_output, activations_ffn = tf.keras.layers.Dropout(
+        ffn_output = tf.keras.layers.Dropout(
             self.dropout_rate, name=name + "/dropout2")(ffn_output, training=training)
         
         activations.update(activations_ffn)
