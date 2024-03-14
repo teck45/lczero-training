@@ -32,6 +32,13 @@ from net import Net
 from keras import backend as K
 
 
+class ClipConstraint(tf.keras.constraints.Constraint):
+    def __init__(self, min_value=-9999, max_value=9999):
+        self.min_value = min_value
+        self.max_value = max_value
+    def __call__(self, w):
+        return K.clip(w, self.min_value, self.max_value)
+
 
 def count_major_pieces(x):
     # x has shape (batch, 64, 12)
@@ -137,7 +144,7 @@ class Quantize(tf.keras.layers.Layer):
     def build(self, input_shape):
         self.num_channels = input_shape[-1] if self.quantize_channels else 1
         self.s = self.add_weight(name='s', shape=[self.num_channels], initializer=tf.constant_initializer(0.002),
-                                    trainable=True, constraint=tf.keras.constraints.NonNeg())
+                                    trainable=True, constraint=ClipConstraint(0.0005, 999.0))
         print(self.name, self.s.shape, "shape")
 
     def call(self, x):
@@ -178,12 +185,12 @@ class DenseLayer(tf.keras.layers.Layer):
                 # rep quant migrates the quantization difficulty from the inputs to the kernel
                 # kernel shape is in, out
                 input_step = tf.expand_dims(tf.stop_gradient(self.input_quantize.s), 1)
-                input_step = input_step / (tf.reduce_mean(input_step) + 1e-5) # for a bit of stability
+                input_step = input_step / (tf.reduce_mean(input_step) + 1e-5) 
 
                 kernel = kernel * input_step
             kernel = self.quantizer(kernel)
             if self.use_rep_quant:
-                kernel = kernel / input_step
+                kernel = kernel / (input_step + 1e-5)
 
         out = tf.matmul(x, kernel)
         if self.use_bias:
@@ -464,6 +471,8 @@ class TFProcess:
             "embedding_style", "new").lower()
 
         self.return_attn_wts = self.cfg["model"].get("return_attn_wts", False)
+        self.return_activations = self.cfg["model"].get("return_activations", False)
+
 
         # experiments with changing have failed
         self.encoder_norm = RMSNorm if self.encoder_rms_norm else tf.keras.layers.LayerNormalization
@@ -662,7 +671,6 @@ class TFProcess:
             self.init_net()
 
     def init_net(self):
-        self.l2reg = tf.keras.regularizers.l2(l=0.5 * (0.0001))
         input_var = tf.keras.Input(shape=(112, 8, 8))
         outputs = self.construct_net(input_var)
         self.model = tf.keras.Model(inputs=input_var, outputs=outputs)
@@ -1992,6 +2000,8 @@ class TFProcess:
         use_bias = not self.omit_qkv_biases
         use_rep_quant = self.rep_quant
 
+        activations = {}
+
 
         input_quantize = Quantize(name=name+"/quantize_1", n_bits=self.quantize_activation_bits, quantize_channels=self.quantize_channels) if self.quantize_activations else None
         if input_quantize is not None:
@@ -2005,6 +2015,10 @@ class TFProcess:
         v = DenseLayer(
             depth, name=name+"/wv", kernel_initializer=initializer, use_bias=use_bias, quantized=self.quantize_weights, n_bits=self.quantize_weight_bits, input_quantize=input_quantize, use_rep_quant=use_rep_quant)(inputs)
 
+
+        activations[name + "/wq"] = q
+        activations[name + "/wk"] = k
+        activations[name + "/wv"] = v
 
         # split q, k and v into smaller vectors of size "depth" -- one for each head in multi-head attention
         batch_size = tf.shape(q)[0]
@@ -2027,11 +2041,14 @@ class TFProcess:
                                  quantize_channels=False) if self.quantize_activations else None
         scaled_attention = out_quantize(scaled_attention) if out_quantize is not None else scaled_attention
 
+        activations[name + "/scaled_attention"] = scaled_attention
+
         # output = tf.keras.layers.Dense(
         #     emb_size, name=name + "/dense", kernel_initializer=initializer, use_bias=not self.omit_other_biases)(scaled_attention)
 
         output = DenseLayer(emb_size, name=name + "/dense", kernel_initializer=initializer, use_bias=not self.omit_other_biases, quantized=self.quantize_weights, n_bits=self.quantize_weight_bits, input_quantize=out_quantize, use_rep_quant=False)(scaled_attention)
-        return output, attention_weights
+        activations[name + "/dense"] = output
+        return output, attention_weights, activations
 
     # 2-layer dense feed-forward network in encoder blocks
     def ffn(self, inputs, emb_size: int, dff: int, initializer, name: str, glu=False):
@@ -2043,8 +2060,7 @@ class TFProcess:
             activation = self.ffn_activation
         
 
-        # dense1 = tf.keras.layers.Dense(
-        #     dff, name=name + "/dense1", kernel_initializer=initializer, activation=activation, use_bias=not self.omit_other_biases)(inputs)
+        activations = {}
 
         use_rep_quant = self.rep_quant
 
@@ -2055,6 +2071,7 @@ class TFProcess:
 
         dense1 = DenseLayer(dff, name=name + "/dense1", kernel_initializer=initializer, activation=activation,
                     use_bias=not self.omit_other_biases, quantized=self.quantize_weights, n_bits=self.quantize_weight_bits, input_quantize=input_quantize, use_rep_quant=use_rep_quant)(inputs)
+        activations[name + "/dense1"] = dense1
 
         if glu:
             dense3 = DenseLayer(dff, name=name + "/dense3", kernel_initializer=initializer,
@@ -2062,17 +2079,15 @@ class TFProcess:
 
             dense1 = dense1 * dense3
 
-        # out = tf.keras.layers.Dense(
-        #     emb_size, name=name + "/dense2", kernel_initializer=initializer, use_bias=not self.omit_other_biases)(dense1)
-
         out_quantize = Quantize(name=name+"/quantize_2", n_bits=self.quantize_activation_bits, quantize_channels=False) if self.quantize_activations else None
         if out_quantize is not None:
             dense1 = out_quantize(dense1)
 
         out = DenseLayer(emb_size, name=name + "/dense2", kernel_initializer=initializer, use_bias=not self.omit_other_biases, quantized=self.quantize_weights, n_bits=self.quantize_weight_bits,
                          input_quantize=out_quantize, use_rep_quant=False)(dense1)
+        activations[name + "/dense2"] = out
 
-        return out
+        return out, activations
 
     def encoder_layer(self, inputs, emb_size: int, d_model: int, num_heads: int, dff: int, name: str, training: bool):
         # DeepNorm
@@ -2082,12 +2097,16 @@ class TFProcess:
             8. * self.encoder_layers, -0.25), self.model_dtype)
 
 
+        activations = {}
+
         xavier_norm = tf.keras.initializers.VarianceScaling(
             scale=beta, mode="fan_avg", distribution="truncated_normal", seed=42)
 
         # multihead attention
-        attn_output, attn_wts = self.mha(
+        attn_output, attn_wts, activations_mha = self.mha(
             inputs, emb_size, d_model, num_heads, xavier_norm, name=name + "/mha")
+
+        activations.update(activations_mha)
 
         # dropout for weight regularization
         attn_output = tf.keras.layers.Dropout(
@@ -2099,19 +2118,23 @@ class TFProcess:
         if not self.skip_first_ln:
             out1 = self.encoder_norm(
                 name=name+"/ln1")(out1)
+        activations[name + "/ln1"] = out1
 
         # feed-forward network
         ffn_output = self.ffn(out1, emb_size, dff,
                               xavier_norm, name=name + "/ffn", glu=self.glu)
-        ffn_output = tf.keras.layers.Dropout(
+        ffn_output, activations_ffn = tf.keras.layers.Dropout(
             self.dropout_rate, name=name + "/dropout2")(ffn_output, training=training)
+        
+        activations.update(activations_ffn)
 
         out2 = out1 + ffn_output * alpha
 
         out2 = self.encoder_norm(
             name=name+"/ln2")(out2)
+        activations[name + "/ln2"] = out2
 
-        return out2, attn_wts
+        return out2, attn_wts, activations
 
     def smolgen_weights(self, inputs, heads: int, hidden_channels: int, hidden_sz: int, gen_sz: int, name: str, activation="swish"):
         compressed = tf.keras.layers.Dense(
@@ -2173,7 +2196,7 @@ class TFProcess:
 
             # square embedding
             flow = tf.keras.layers.Dense(self.embedding_size, kernel_initializer="glorot_normal",
-                                         kernel_regularizer=self.l2reg, activation=self.DEFAULT_ACTIVATION,
+                                         activation=self.DEFAULT_ACTIVATION,
                                          name=name+"embedding")(flow)
             flow = self.encoder_norm(
                 name=name+"embedding/ln")(flow)
@@ -2213,7 +2236,6 @@ class TFProcess:
             # square embedding
             flow = tf.keras.layers.Dense(self.embedding_size,
                                          kernel_initializer='glorot_normal',
-                                         kernel_regularizer=self.l2reg,
                                          activation=self.DEFAULT_ACTIVATION,
                                          name='embedding')(flow)
 
@@ -2225,27 +2247,20 @@ class TFProcess:
                 "Unknown embedding style: {}".format(self.embedding_style))
 
         attn_wts = []
+        activations = {}
         for i in range(self.encoder_layers):
-            flow, attn_wts_l = self.encoder_layer(flow, self.embedding_size, self.encoder_d_model,
+            flow, attn_wts_l, activations_l = self.encoder_layer(flow, self.embedding_size, self.encoder_d_model,
                                                   self.encoder_heads, self.encoder_dff,
                                                   name=name+"encoder_{}".format(i + 1), training=True)
-            if self.withhold_position and i == self.give_position_layer:
-                c1 = tf.keras.layers.Dense(192, name=name+"intropos_1", activation="swish")(curr_pos_flat)
-                n = 128
-                c2 = tf.keras.layers.Dense(64 * n, activation="swish", name=name+"intropos_2")(c1)
-                c2 = tf.reshape(c2, [-1, 64, n])
-                flow = tf.concat([flow, curr_pos, c2], axis=-1)
-                flow = tf.keras.layers.Dense(self.embedding_size, name=name+"intro_dense", activation="swish")(flow)
-                flow = tf.keras.layers.LayerNormalization(name=name+"intro_ln")(flow)
-
-
 
             attn_wts.append(attn_wts_l)
+            activations.update(activations_l)
+
 
         flow_ = flow
 
         policy_tokens = tf.keras.layers.Dense(self.pol_embedding_size, kernel_initializer="glorot_normal",
-                                              kernel_regularizer=self.l2reg, activation=self.DEFAULT_ACTIVATION,
+                                              activation=self.DEFAULT_ACTIVATION,
                                               name=name+"policy/embedding")(flow_)
 
         def policy_head(name, activation=None, depth=None, opponent=False):
@@ -2339,25 +2354,21 @@ class TFProcess:
 
         def value_head(name, wdl=True, use_err=True, use_cat=True):
             embedded_val = tf.keras.layers.Dense(self.val_embedding_size, kernel_initializer="glorot_normal",
-                                                 kernel_regularizer=self.l2reg, activation=self.DEFAULT_ACTIVATION,
+                                                 activation=self.DEFAULT_ACTIVATION,
                                                  name=name+"/embedding")(flow)
             h_val_flat = tf.keras.layers.Flatten()(embedded_val)
             h_fc2 = tf.keras.layers.Dense(128,
                                           kernel_initializer="glorot_normal",
-                                          kernel_regularizer=self.l2reg,
                                           activation=self.DEFAULT_ACTIVATION,
                                           name=name+"/dense1")(h_val_flat)
             # WDL head
             if wdl:
                 value = tf.keras.layers.Dense(3,
                                               kernel_initializer="glorot_normal",
-                                              kernel_regularizer=self.l2reg,
-                                              bias_regularizer=self.l2reg,
                                               name=name+"/dense2")(h_fc2)
             else:
                 value = tf.keras.layers.Dense(1,
                                               kernel_initializer="glorot_normal",
-                                              kernel_regularizer=self.l2reg,
                                               activation="tanh",
                                               name=name+"/dense2")(h_fc2)
 
@@ -2386,20 +2397,18 @@ class TFProcess:
         # Moves left head
         if self.moves_left:
             embedded_mov = tf.keras.layers.Dense(self.mov_embedding_size, kernel_initializer="glorot_normal",
-                                                 kernel_regularizer=self.l2reg, activation=self.DEFAULT_ACTIVATION,
+                                                 activation=self.DEFAULT_ACTIVATION,
                                                  name=name+"moves_left/embedding")(flow)
             h_mov_flat = tf.keras.layers.Flatten()(embedded_mov)
 
             h_fc4 = tf.keras.layers.Dense(
                 128,
                 kernel_initializer="glorot_normal",
-                kernel_regularizer=self.l2reg,
                 activation=self.DEFAULT_ACTIVATION,
                 name=name+"moves_left/dense1")(h_mov_flat)
 
             moves_left = tf.keras.layers.Dense(1,
                                                kernel_initializer="glorot_normal",
-                                               kernel_regularizer=self.l2reg,
                                                activation="relu",
                                                name=name+"moves_left/dense2")(h_fc4)
         else:
@@ -2424,7 +2433,9 @@ class TFProcess:
 
         if self.return_attn_wts:
             outputs["attn_wts"] = attn_wts
-
+        if self.return_activations:
+            outputs["activations"] = activations
+ 
         # Tensorflow does not accept None values in the output dictionary
         none_keys = []
         for key in outputs:
