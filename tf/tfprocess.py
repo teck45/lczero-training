@@ -456,7 +456,6 @@ class TFProcess:
         self.smolgen_gen_sz = self.cfg["model"].get("smolgen_gen_sz")
         self.smolgen_activation = self.cfg["model"].get("smolgen_activation")
 
-        self.skip_first_ln = self.cfg["model"].get("skip_first_ln", False)
         self.omit_qkv_biases =  self.cfg["model"].get("omit_qkv_biases", False)
         self.omit_other_biases = self.cfg["model"].get("omit_other_biases", False)
         self.encoder_rms_norm = self.cfg["model"].get(
@@ -2115,9 +2114,6 @@ class TFProcess:
         # skip connection + layernorm
         out1 = inputs + attn_output * alpha
         # out1 = inputs
-        if not self.skip_first_ln:
-            out1 = self.encoder_norm(
-                name=name+"/ln1")(out1)
         activations[name + "/ln1"] = out1
 
         # feed-forward network
