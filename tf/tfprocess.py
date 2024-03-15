@@ -258,11 +258,12 @@ class ApplyAttentionPolicyMap(tf.keras.layers.Layer):
 
 
 class RPELogits(tf.keras.layers.Layer):
-    rpe_factorizer = tf.constant(rpe_map, dtype=tf.float32)
     def __init__(self, rpe_type=None, **kwargs):
         super(RPELogits, self).__init__(**kwargs)
         assert rpe_type in ['q', 'k']
         self.rpe_type = rpe_type
+        self.rpe_factorizer = tf.constant(rpe_map, dtype=self.dtype)
+
 
     def build(self, input_shape):
         # 0 h 64 d
@@ -275,7 +276,7 @@ class RPELogits(tf.keras.layers.Layer):
                                      trainable=True)
 
     def call(self, x):
-        rpe = self.rpe @ tf.cast(self.rpe_factorizer, self.rpe.dtype)
+        rpe = self.rpe @ tf.cast(self.rpe_factorizer, x.dtype)
         rpe = tf.reshape(rpe, [self.head_depth, self.head_count, 64, 64])
 
         if self.rpe_type == 'q':
@@ -291,22 +292,23 @@ class RPELogits(tf.keras.layers.Layer):
         return config
 
 class RPEValue(tf.keras.layers.Layer):
-    rpe_factorizer = tf.constant(rpe_map, dtype=tf.float32)
     def __init__(self, head_depth,  **kwargs):
         super(RPEValue, self).__init__(**kwargs)
         self.head_depth = head_depth
+        self.rpe_factorizer = tf.constant(rpe_map, dtype=self.dtype)
+
 
     def build(self, input_shape):
         # 0 h 64 d
 
         self.head_count = input_shape[1]
         self.rpe_value = self.add_weight(name="rpe_value",
-                                     shape=[self.head_depth * self.head_count, self.rank],
+                                     shape=[self.head_depth * self.head_count, 15 * 15],
                                      initializer="zeros",
                                      trainable=True)
 
     def call(self, wts):
-        rpe_value = self.rpe_value @ tf.cast(self.rpe_factorizer, self.rpe_value.dtype)
+        rpe_value = self.rpe_value @ tf.cast(self.rpe_factorizer, wts.dtype)
 
         rpe_value = tf.reshape(rpe_value, [self.head_depth, self.head_count, 64, 64])
 
@@ -419,6 +421,8 @@ class TFProcess:
         self.use_rpe_q = self.cfg["model"].get("use_rpe_q", False)
         self.use_rpe_k = self.cfg["model"].get("use_rpe_k", False)
         self.use_rpe_v = self.cfg["model"].get("use_rpe_v", False)
+        
+        self.use_extra_lns = self.cfg["model"].get("use_extra_lns", False)
 
 
         self.use_logit_gating = self.cfg["model"].get("use_logit_gating", False)
@@ -686,7 +690,7 @@ class TFProcess:
 
         restore_path = self.cfg['training'].get("pb_source", None)
         if restore_path is not None:
-            self.replace_weights(restore_path, ignore_errors=True)
+            self.replace_weights(restore_path, ignore_errors=False)
 
         self.active_lr = tf.Variable(0.000001, trainable=False)
         # All 'new' (TF 2.10 or newer non-legacy) optimizers must have learning_rate updated manually.
@@ -2192,8 +2196,10 @@ class TFProcess:
                                          kernel_initializer='glorot_normal',
                                          activation=self.DEFAULT_ACTIVATION,
                                          name='embedding')(flow)
-
-            # !!! input gate
+            if self.use_extra_lns:
+                flow = self.encoder_norm(
+                    name='embedding/ln')(flow)
+                
             flow = ma_gating(flow, name='embedding')
 
         else:
@@ -2216,6 +2222,9 @@ class TFProcess:
         policy_tokens = tf.keras.layers.Dense(self.pol_embedding_size, kernel_initializer="glorot_normal",
                                               activation=self.DEFAULT_ACTIVATION,
                                               name=name+"policy/embedding")(flow_)
+    
+        if self.use_extra_lns:
+            policy_tokens = self.encoder_norm(name=name+"policy/ln")(policy_tokens)
 
         def policy_head(name, activation=None, depth=None, opponent=False):
             if depth is None:
@@ -2239,7 +2248,7 @@ class TFProcess:
             # keys = tf.keras.layers.Dense(self.policy_d_model, kernel_initializer="glorot_normal",
             #                              name="policy/attention/wk")(flow)
 
-            # PAWN PROMOTION: create promotion logits using scalar offsets generated from the promotion-rank keys
+            # PAWN PROMOTION: create promotion logits using scalar offsets generated from the promotion-  keys
             # constant for scaling
             dk = tf.math.sqrt(tf.cast(tf.shape(keys)[-1], self.model_dtype))
             promotion_keys = keys[:, -8:, :]
@@ -2310,11 +2319,17 @@ class TFProcess:
             embedded_val = tf.keras.layers.Dense(self.val_embedding_size, kernel_initializer="glorot_normal",
                                                  activation=self.DEFAULT_ACTIVATION,
                                                  name=name+"/embedding")(flow)
+            if self.use_extra_lns:
+                embedded_val = self.encoder_norm(
+                    name=name+"/ln1")(embedded_val)
             h_val_flat = tf.keras.layers.Flatten()(embedded_val)
             h_fc2 = tf.keras.layers.Dense(128,
                                           kernel_initializer="glorot_normal",
                                           activation=self.DEFAULT_ACTIVATION,
                                           name=name+"/dense1")(h_val_flat)
+            if self.use_extra_lns:
+                h_fc2 = self.encoder_norm(
+                    name=name+"/ln2")(h_fc2)
             # WDL head
             if wdl:
                 value = tf.keras.layers.Dense(3,
@@ -2353,6 +2368,7 @@ class TFProcess:
             embedded_mov = tf.keras.layers.Dense(self.mov_embedding_size, kernel_initializer="glorot_normal",
                                                  activation=self.DEFAULT_ACTIVATION,
                                                  name=name+"moves_left/embedding")(flow)
+
             h_mov_flat = tf.keras.layers.Flatten()(embedded_mov)
 
             h_fc4 = tf.keras.layers.Dense(
@@ -2360,6 +2376,8 @@ class TFProcess:
                 kernel_initializer="glorot_normal",
                 activation=self.DEFAULT_ACTIVATION,
                 name=name+"moves_left/dense1")(h_mov_flat)
+            
+
 
             moves_left = tf.keras.layers.Dense(1,
                                                kernel_initializer="glorot_normal",
