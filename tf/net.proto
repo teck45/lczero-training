@@ -137,8 +137,6 @@ message Weights {
     optional uint32 pol_headcount = 103;
     optional Layer ip_pol_w = 1;
     optional Layer ip_pol_b = 2;
-    optional Layer ip_pol_ln_gammas = 8;
-    optional Layer ip_pol_ln_betas = 9;
     // For policy attention, up to and including NETWORK_SE_WITH_HEADFORMAT the
     // "embedding" activation is SELU, otherwise it is the default activation.
     optional Layer ip2_pol_w = 3;  // "wq" in policy attention
@@ -153,12 +151,8 @@ message Weights {
     optional ConvBlock value = 100;
     optional Layer ip_val_w = 1;  // "embedding" for attention body value
     optional Layer ip_val_b = 2;
-    optional Layer ip_ln1_gammas = 11;
-    optional Layer ip_ln1_betas = 12;
     optional Layer ip1_val_w = 3;
     optional Layer ip1_val_b = 4;
-    optional Layer ip_ln2_gammas = 13;
-    optional Layer ip_ln2_betas = 14;
     optional Layer ip2_val_w = 5;
     optional Layer ip2_val_b = 6;
     optional Layer ip_val_err_w = 7;
@@ -170,7 +164,6 @@ message Weights {
   message PolicyHeads {
     optional Layer ip_pol_w = 1;    // "embedding" in policy attention
     optional Layer ip_pol_b = 2;
-    
     optional PolicyHead vanilla = 3;
     optional PolicyHead optimistic_st = 4;
     optional PolicyHead soft = 5;
