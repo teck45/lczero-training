@@ -68,6 +68,7 @@ rpe_map = make_rpe_map()
     
 
 
+
 def get_activation(activation):
     if isinstance(activation, str) or activation is None:
         try:
@@ -218,10 +219,6 @@ def ma_gating(inputs, name):
     out = Gating(name=name + '/mult_gate', additive=False)(inputs)
     out = Gating(name=name + '/add_gate', additive=True)(out)
     return out
-
-
-def square_relu(x):
-    return tf.nn.relu(x) ** 2
 
 
 class RMSNorm(tf.keras.layers.Layer):
