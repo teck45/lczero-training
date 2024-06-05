@@ -329,15 +329,6 @@ class Net:
                     pb_name = pb_prefix + 'ip_pol_w'
                 else:
                     pb_name = pb_prefix + 'ip_pol_b'
-            elif layers[1] == 'ln':
-                if layers[2] == 'gamma':
-                    pb_name = pb_prefix + 'ip_pol_ln_gammas'
-                elif layers[2] == 'beta':
-                    pb_name = pb_prefix + 'ip_pol_ln_betas'
-                else:
-                    raise ValueError(
-                        'Unable to decode policy weight {}/{}'.format(layers[2],
-                                                                     weights_name))
                 
             elif layers[1] in ['vanilla', 'soft', 'optimistic_st', 'opponent', 'next']:
                 pb_prefix = pb_prefix + layers[1] + '.'
@@ -351,21 +342,12 @@ class Net:
                 pb_prefix = 'value_heads.' + layers[1] + '.'
             if 'dense' in layers[2] or 'embedding' in layers[2]:
                 pb_name = value_to_bp(layers[2], weights_name)
-            if 'ln1' in layers[2]:
-                if layers[3] == 'gamma':
-                    pb_name = 'ip_val_ln1_gammas'
-                elif layers[3] == 'beta':
-                    pb_name = 'ip_val_ln1_betas'
-            if 'ln2' in layers[2]:
-                if layers[3] == 'gamma':
-                    pb_name = 'ip_val_ln2_gammas'
-                elif layers[3] == 'beta':
-                    pb_name = 'ip_val_ln2_betas'
-
             pb_name = pb_prefix + pb_name
+
         elif base_layer == 'moves_left':
             if 'dense' in layers[1] or 'embedding' in layers[1]:
                 pb_name = moves_left_to_bp(layers[1], weights_name)
+
         elif base_layer.startswith('encoder'):
             encoder_block = int(base_layer.split('_')[1]) - 1
             if layers[1] == 'mha':
@@ -378,6 +360,7 @@ class Net:
                 pb_name = 'ffn.' + ffn_to_bp(layers[2], weights_name)
             else:
                 pb_name = encoder_to_bp(layers[1], weights_name)
+                
         elif base_layer == 'embedding':
             if layers[1].split(':')[0] == 'kernel':
                 pb_name = 'ip_emb_w'

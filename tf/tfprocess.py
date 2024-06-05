@@ -419,7 +419,6 @@ class TFProcess:
         self.use_rpe_k = self.cfg["model"].get("use_rpe_k", False)
         self.use_rpe_v = self.cfg["model"].get("use_rpe_v", False)
         
-        self.use_extra_lns = self.cfg["model"].get("use_extra_lns", False)
 
 
         self.use_logit_gating = self.cfg["model"].get("use_logit_gating", False)
@@ -2193,9 +2192,6 @@ class TFProcess:
                                          kernel_initializer='glorot_normal',
                                          activation=self.DEFAULT_ACTIVATION,
                                          name='embedding')(flow)
-            if self.use_extra_lns:
-                flow = self.encoder_norm(
-                    name='embedding/ln')(flow)
                 
             flow = ma_gating(flow, name='embedding')
 
@@ -2220,8 +2216,6 @@ class TFProcess:
                                               activation=self.DEFAULT_ACTIVATION,
                                               name=name+"policy/embedding")(flow_)
     
-        if self.use_extra_lns:
-            policy_tokens = self.encoder_norm(name=name+"policy/ln")(policy_tokens)
 
         def policy_head(name, activation=None, depth=None, opponent=False):
             if depth is None:
@@ -2316,17 +2310,13 @@ class TFProcess:
             embedded_val = tf.keras.layers.Dense(self.val_embedding_size, kernel_initializer="glorot_normal",
                                                  activation=self.DEFAULT_ACTIVATION,
                                                  name=name+"/embedding")(flow)
-            if self.use_extra_lns:
-                embedded_val = self.encoder_norm(
-                    name=name+"/ln1")(embedded_val)
+
             h_val_flat = tf.keras.layers.Flatten()(embedded_val)
             h_fc2 = tf.keras.layers.Dense(128,
                                           kernel_initializer="glorot_normal",
                                           activation=self.DEFAULT_ACTIVATION,
                                           name=name+"/dense1")(h_val_flat)
-            if self.use_extra_lns:
-                h_fc2 = self.encoder_norm(
-                    name=name+"/ln2")(h_fc2)
+
             # WDL head
             if wdl:
                 value = tf.keras.layers.Dense(3,
