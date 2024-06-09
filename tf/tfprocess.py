@@ -241,7 +241,7 @@ class RMSNorm(tf.keras.layers.Layer):
         factor = tf.math.rsqrt(tf.reduce_mean(
             tf.square(inputs), axis=-1, keepdims=True) + 1e-5)
         mul = lambda x,y,z: x * y * z
-        if self.checkpoint_activations:
+        if False and self.checkpoint_activations:
             mul = tf.recompute_grad(mul)
         return mul(inputs, factor, self.gamma)
 
@@ -661,10 +661,13 @@ class TFProcess:
         print(f"params: {self.model.count_params()}")
         smolgen_params = np.sum([K.count_params(w) for w in self.model.trainable_weights if "smol" in w.name])
         emb_params = np.sum([K.count_params(w) for w in self.model.trainable_weights if "embedding/preprocess" in w.name])
+        rpe_params = np.sum([K.count_params(w) for w in self.model.trainable_weights if "rpe" in w.name])
 
 
         print(f"smolgen params: {smolgen_params}")
         print(f"emb preproc params: {emb_params}")
+        print(f"rpe params: {rpe_params}")
+
 
 
 
@@ -1801,6 +1804,8 @@ class TFProcess:
             params = self.model.count_params()
             smolgen_params = np.sum([K.count_params(w) for w in self.model.trainable_weights if "smol" in w.name])
             emb_params = np.sum([K.count_params(w) for w in self.model.trainable_weights if "embedding/preprocess" in w.name])
+            rpe_params = np.sum([K.count_params(w) for w in self.model.trainable_weights if "rpe" in w.name])
+
             try:
                 import tensorflow_models as tfm
 
@@ -1912,7 +1917,7 @@ class TFProcess:
         self.net.save_proto(filename)
 
     @staticmethod
-    def split_heads(inputs, batch_size: int, num_heads: int, depth: int):
+    def split_heads(inputs, batch_size: int, num_heads: int, depth: int, checkpoint_activations=False):
         if num_heads < 2:
             return inputs
         reshaped = tf.reshape(inputs, (batch_size, 64, num_heads, depth))
@@ -2002,13 +2007,9 @@ class TFProcess:
         # split q, k and v into smaller vectors of size "depth" -- one for each head in multi-head attention
         batch_size = tf.shape(q)[0]
 
-        split_heads = lambda x: self.split_heads(x, batch_size, num_heads, head_depth)
-        if checkpoint_activations:
-            split_heads = tf.recompute_grad(split_heads)
-
-        q = split_heads(q)
-        k = split_heads(k)
-        v = split_heads(v)
+        q = self.split_heads(q, batch_size, num_heads, head_depth, checkpoint_activations=checkpoint_activations)
+        k = self.split_heads(k, batch_size, num_heads, head_depth, checkpoint_activations=checkpoint_activations)
+        v = self.split_heads(v, batch_size, num_heads, head_depth, checkpoint_activations=checkpoint_activations)
 
         scaled_attention, attention_weights = self.scaled_dot_product_attention(
             q, k, v, name=name, inputs=inputs)
