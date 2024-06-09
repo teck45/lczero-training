@@ -1299,6 +1299,9 @@ class TFProcess:
                 try:
                     loop()
                 except tf.errors.ResourceExhaustedError as e:
+                    print("Memory resources exhausted. Try decreasing batch size or model dimension or "
+                    "enabling activation checkpointing with 'checkpoint_activations: true' under training.")
+                    print("Saving model...")
                     steps = self.global_step.read_value()
                     evaled_steps = steps.numpy()
                     self.manager.save(checkpoint_number=evaled_steps)
