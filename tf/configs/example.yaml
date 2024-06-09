@@ -34,7 +34,9 @@ training:
     renorm_max_r: 1.0
     renorm_max_d: 0.0
     test_steps: 1_000
-    disable_pb_checkpointing: true
+    disable_pb_checkpointing: false
+    checkpoint_activations: false
+
     # validation_steps: 5000
     num_test_positions: 131_072
     train_avg_report_steps: 1_000
