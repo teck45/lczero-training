@@ -149,7 +149,7 @@ class Quantize(tf.keras.layers.Layer):
         return quantize(x, self.s, 0.0, self.n_bits, n_features)
 
 class DenseLayer(tf.keras.layers.Layer):
-    def __init__(self, units, activation=None, n_bits=8, use_bias=True, kernel_initializer=None, quantized=False, input_quantize=None, use_rep_quant=False, **kwargs):
+    def __init__(self, units, activation=None, n_bits=8, use_bias=True, kernel_initializer=None, quantized=False, input_quantize=None, use_rep_quant=False, checkpoint_activations=False, **kwargs):
         super(DenseLayer, self).__init__(**kwargs)
         self.units = units
         self.activation = get_activation(activation)
@@ -159,6 +159,9 @@ class DenseLayer(tf.keras.layers.Layer):
         self.quantized=quantized
         self.input_quantize = input_quantize
         self.use_rep_quant = use_rep_quant
+        self.checkpoint_activations = checkpoint_activations
+        if self.checkpoint_activations:
+            self.activation = tf.recompute_grad(self.activation)
         if self.use_rep_quant:
             assert self.input_quantize is not None, "input_quantize must be provided if use_rep_quant is True"
 
@@ -222,9 +225,10 @@ def ma_gating(inputs, name):
 
 
 class RMSNorm(tf.keras.layers.Layer):
-    def __init__(self, scale=True, **kwargs):
+    def __init__(self, scale=True, checkpoint_activations=False, **kwargs):
         super(RMSNorm, self).__init__(**kwargs)
         self.scale = scale
+        self.checkpoint_activations = checkpoint_activations
 
     def build(self, input_shape):
         self.gamma = self.add_weight(name="gamma",
@@ -236,7 +240,10 @@ class RMSNorm(tf.keras.layers.Layer):
     def call(self, inputs):
         factor = tf.math.rsqrt(tf.reduce_mean(
             tf.square(inputs), axis=-1, keepdims=True) + 1e-5)
-        return inputs * factor * self.gamma
+        mul = lambda x,y,z: x * y * z
+        if self.checkpoint_activations:
+            mul = tf.recompute_grad(mul)
+        return mul(inputs, factor, self.gamma)
 
 
 class ApplyAttentionPolicyMap(tf.keras.layers.Layer):
@@ -372,6 +379,8 @@ class TFProcess:
         self.quantize_channels = self.cfg["model"].get("quantize_channels", False)
         self.rep_quant = self.cfg["model"].get("rep_quant", False)
 
+        self.checkpoint_activations = self.cfg["training"].get("checkpoint_activations", False)
+
 
 
         # Network structure
@@ -434,11 +443,6 @@ class TFProcess:
         self.omit_other_biases = self.cfg["model"].get("omit_other_biases", False)
         self.encoder_rms_norm = self.cfg["model"].get(
             "encoder_rms_norm", False)
-
-        self.withhold_position = self.cfg["model"].get(
-            "withhold_position", False)
-        self.give_position_layer = self.cfg["model"].get(
-            "give_position_layer", 0)
 
         self.embedding_style = self.cfg["model"].get(
             "embedding_style", "new").lower()
@@ -1962,7 +1966,7 @@ class TFProcess:
 
     # multi-head attention in encoder blocks
 
-    def mha(self, inputs, emb_size: int, d_model: int, num_heads: int, initializer, name: str, att_expansion: int=1):
+    def mha(self, inputs, emb_size: int, d_model: int, num_heads: int, initializer, name: str, att_expansion: int=1, checkpoint_activations=False):
         depth = d_model * att_expansion
         assert depth % num_heads == 0
 
@@ -1993,12 +1997,18 @@ class TFProcess:
         activations[name + "/wk"] = k
         activations[name + "/wv"] = v
 
+        
+
         # split q, k and v into smaller vectors of size "depth" -- one for each head in multi-head attention
         batch_size = tf.shape(q)[0]
 
-        q = self.split_heads(q, batch_size, num_heads, head_depth)
-        k = self.split_heads(k, batch_size, num_heads, head_depth)
-        v = self.split_heads(v, batch_size, num_heads, head_depth)
+        split_heads = lambda x: self.split_heads(x, batch_size, num_heads, head_depth)
+        if checkpoint_activations:
+            split_heads = tf.recompute_grad(split_heads)
+
+        q = split_heads(q)
+        k = split_heads(k)
+        v = split_heads(v)
 
         scaled_attention, attention_weights = self.scaled_dot_product_attention(
             q, k, v, name=name, inputs=inputs)
@@ -2024,15 +2034,15 @@ class TFProcess:
         return output, attention_weights, activations
 
     # 2-layer dense feed-forward network in encoder blocks
-    def ffn(self, inputs, emb_size: int, dff: int, initializer, name: str, glu=False):
+    def ffn(self, inputs, emb_size: int, dff: int, initializer, name: str, glu=False, checkpoint_activations=False):
         if glu:
             activation = tf.keras.activations.get("swish")
         elif isinstance(self.ffn_activation, str):
             activation = tf.keras.activations.get(self.ffn_activation)
         else:
             activation = self.ffn_activation
-        
 
+    
         activations = {}
 
         use_rep_quant = self.rep_quant
@@ -2043,7 +2053,9 @@ class TFProcess:
             inputs = input_quantize(inputs)
 
         dense1 = DenseLayer(dff, name=name + "/dense1", kernel_initializer=initializer, activation=activation,
-                    use_bias=not self.omit_other_biases, quantized=self.quantize_weights, n_bits=self.quantize_weight_bits, input_quantize=input_quantize, use_rep_quant=use_rep_quant)(inputs)
+                    use_bias=not self.omit_other_biases, quantized=self.quantize_weights, n_bits=self.quantize_weight_bits, input_quantize=input_quantize, use_rep_quant=use_rep_quant, checkpoint_activations=checkpoint_activations)(inputs)
+        
+        
         activations[name + "/dense1"] = dense1
 
         if glu:
@@ -2062,7 +2074,7 @@ class TFProcess:
 
         return out, activations
 
-    def encoder_layer(self, inputs, emb_size: int, d_model: int, num_heads: int, dff: int, name: str, training: bool):
+    def encoder_layer(self, inputs, emb_size: int, d_model: int, num_heads: int, dff: int, name: str, training: bool, checkpoint_activations: bool=False):
         # DeepNorm
         alpha = tf.cast(tf.math.pow(
             2. * self.encoder_layers, -0.25), self.model_dtype)
@@ -2077,7 +2089,7 @@ class TFProcess:
 
         # multihead attention
         attn_output, attn_wts, activations_mha = self.mha(
-            inputs, emb_size, d_model, num_heads, xavier_norm, name=name + "/mha")
+            inputs, emb_size, d_model, num_heads, xavier_norm, name=name + "/mha", checkpoint_activations=checkpoint_activations)
 
         activations.update(activations_mha)
 
@@ -2086,22 +2098,20 @@ class TFProcess:
             self.dropout_rate, name=name + "/dropout1")(attn_output, training=training)
 
         # skip connection + layernorm
-        out1 = inputs + attn_output * alpha
-        # out1 = inputs
+        out1 = self.encoder_norm(
+            name=name+"/ln1", checkpoint_activations=checkpoint_activations)(inputs + attn_output * alpha)
         activations[name + "/ln1"] = out1
 
         # feed-forward network
         ffn_output, activations_ffn = self.ffn(out1, emb_size, dff,
-                              xavier_norm, name=name + "/ffn", glu=self.glu)
+                              xavier_norm, name=name + "/ffn", glu=self.glu, checkpoint_activations=checkpoint_activations)
         ffn_output = tf.keras.layers.Dropout(
             self.dropout_rate, name=name + "/dropout2")(ffn_output, training=training)
         
         activations.update(activations_ffn)
 
-        out2 = out1 + ffn_output * alpha
-
         out2 = self.encoder_norm(
-            name=name+"/ln2")(out2)
+            name=name+"/ln2", checkpoint_activations=checkpoint_activations)(out1 + ffn_output * alpha)
         activations[name + "/ln2"] = out2
 
         return out2, attn_wts, activations
@@ -2172,20 +2182,12 @@ class TFProcess:
                                   xavier_norm, name=name + "embedding/ffn")
 
 
-
             flow = self.encoder_norm(
                 name=name+"embedding/ffn_ln")(flow + ffn_output * alpha)
 
         elif self.embedding_style == "old":
             flow = tf.transpose(inputs, perm=[0, 2, 3, 1])
             flow = tf.reshape(flow, [-1, 64, tf.shape(inputs)[1]])
-            curr_pos = flow[..., :26] #also last
-            curr_pos_flat = tf.reshape(curr_pos, [-1, 64 * 26])
-
-
-
-            if self.withhold_position:
-                flow = tf.concat([flow[..., :13] * 0 , flow[..., 13:]], axis=-1)
 
             # square embedding
             flow = tf.keras.layers.Dense(self.embedding_size,
@@ -2204,7 +2206,7 @@ class TFProcess:
         for i in range(self.encoder_layers):
             flow, attn_wts_l, activations_l = self.encoder_layer(flow, self.embedding_size, self.encoder_d_model,
                                                   self.encoder_heads, self.encoder_dff,
-                                                  name=name+"encoder_{}".format(i + 1), training=True)
+                                                  name=name+"encoder_{}".format(i + 1), training=True, checkpoint_activations=self.checkpoint_activations)
 
             attn_wts.append(attn_wts_l)
             activations.update(activations_l)
