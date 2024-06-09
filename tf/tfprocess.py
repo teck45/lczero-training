@@ -32,6 +32,33 @@ from net import Net
 from keras import backend as K
 
 
+# @tf.custom_gradient
+# def gradient_checkpointed_matmul(x, kernel, bias):
+#     out = tf.matmul(x, kernel) + bias
+#     def grad(dy):          
+#         # the gradients for x and bias are calculated normally and that for kernel is split up to reduce memory usage
+#         dx = tf.matmul(dy, tf.transpose(kernel))
+#         db = tf.reduce_sum(dy, axis=range(len(dy.shape) - 1)))
+#         x = tf.reshape(x, [-1, x.shape[-1]])
+#         dy = tf.reshape(dy, [-1, dy.shape[-1]])
+#         dk = tf.matmul(tf.transpose(x), dy)
+
+# 			  return dx, dk, db
+#     return out, grad
+
+@tf.custom_gradient
+def gradient_checkpointed_matmul(x, kernel):
+    out = tf.matmul(x, kernel)
+    def grad(dy):          
+        # the gradients for x and bias are calculated normally and that for kernel is split up to reduce memory usage
+        dx = tf.matmul(dy, tf.transpose(kernel))
+        xr = tf.reshape(x, [-1, x.shape[-1]])
+        dyr = tf.reshape(dy, [-1, dy.shape[-1]])
+        dk = tf.matmul(tf.transpose(xr), dyr)
+        return dx, dk
+    return out, grad
+    
+
 class ClipConstraint(tf.keras.constraints.Constraint):
     def __init__(self, min_value=-9999, max_value=9999):
         self.min_value = min_value
@@ -188,7 +215,7 @@ class DenseLayer(tf.keras.layers.Layer):
             if self.use_rep_quant:
                 kernel = kernel / (input_step + 1e-5)
 
-        out = tf.matmul(x, kernel)
+        out = gradient_checkpointed_matmul(x, kernel)
         if self.use_bias:
             out = tf.add(out, self.bias)
         return self.activation(out)
