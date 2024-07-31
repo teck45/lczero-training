@@ -1,70 +1,130 @@
-
 import numpy as np
 from net import Net
 import net
 import proto.net_pb2 as pb
-
 import os
 from subprocess import Popen, PIPE
 import multiprocessing
 from concurrent.futures import ThreadPoolExecutor
 import sys
+from time import time
+import argparse
 
+# Parse command-line arguments
+parser = argparse.ArgumentParser(description='SPSA training script for Leela Chess Zero')
+parser.add_argument('lc0_path', help='Path to lc0 executable')
+parser.add_argument('book_path', help='Path to opening book')
+parser.add_argument('net_dir', help='Directory for network files')
+parser.add_argument('base_name', help='Base name for network files')
+parser.add_argument('--ext', default=".pb.gz", help='File extension for network files')
+parser.add_argument('--rounds', type=int, default=150, help='Number of rounds')
+parser.add_argument('--nodes', type=int, default=64, help='Number of nodes')
+parser.add_argument('--gpus', type=int, default=1, help='Number of GPUs')
+parser.add_argument('--learning_rate', type=float, default=0.002, help='Learning rate')
+parser.add_argument('--perturbation_size', type=float, default=1.0, help='Perturbation size')
+parser.add_argument('--test_interval', type=int, default=5, help='Interval for testing against original network')
+
+args = parser.parse_args()
+
+# Configuration (now using parsed arguments)
+LC0_PATH = args.lc0_path
+BOOK_PATH = args.book_path
+NET_DIR = args.net_dir
+BASE_NAME = args.base_name
+EXT = args.ext
+ROUNDS = args.rounds
+NODES = args.nodes
+GPUS = args.gpus
+LEARNING_RATE = args.learning_rate
+PERTURBATION_SIZE = args.perturbation_size
+TEST_INTERVAL = args.test_interval
+
+# Rest of the code remains the same
 def is_number(s):
     return s.lstrip('-').replace('.','',1).isdigit()
 
-def get_elo(output):
-    # the elo is between "Elo difference:" and "LOS:"
-    x = output.find(b"Elo difference:")
-    y = output.find(b"LOS:")
-    ticket = str(output[x:y])
-    ticket = ticket.replace("Elo difference:", "").replace(",", "").replace("'", "").replace(" ", "").replace("b", "")
-    ticket = ticket.split("+/-")
-    if is_number(ticket[0]) and is_number(ticket[1]):
-        return float(ticket[0]), float(ticket[1])
-    else:
-        return None, None
+def get_elo_and_npm(output):
+    elo, los, total_npm, npm_count = None, None, 0, 0
+    for line in output.decode('utf-8').split('\n'):
+        if line.startswith('tournamentstatus final'):
+            parts = line.split()
+            for i, part in enumerate(parts):
+                if part == 'Elo:':
+                    elo = float(parts[i+1])
+                    # Find the LOS value, which should be two parts after 'LOS:'
+                    los_index = parts.index('LOS:')
+                    los = float(parts[los_index + 1].rstrip('%'))
+                if part == 'npm':
+                    total_npm += float(parts[i+1])
+                    npm_count += 1
+    avg_npm = total_npm / npm_count if npm_count > 0 else 0
+    return elo, los, avg_npm
 
 def run_cmd(command, results):
-    process = Popen(command, shell = True, stdout = PIPE)
-    output = process.communicate()[0]
-    elo, error = get_elo(output)
+    process = Popen(command, shell=True, stdout=PIPE, stderr=PIPE)
+    output, _ = process.communicate()
+    elo, error, npm = get_elo_and_npm(output)
+    if elo is not None:
+        results.put((elo, error, npm))
 
-    if elo is None:
-        return
-    
-    results.put((elo, error))
+def do_iteration(net_path, save_path_p, save_path_n, save_path, r=LEARNING_RATE, do_spsa=True):
+    if do_spsa:
+        orig_net, adjustments = apply_spsa(net_path, save_path_p, save_path_n)
+
+    rounds_per_gpu = ROUNDS // GPUS
+    total_rounds = rounds_per_gpu * GPUS  
+    print(f"Starting iteration with {total_rounds} rounds")
+
+    start_time = time()
+
+    elo = 0
+    error = 0
+    total_npm = 0
+    n = 0
+
+    results = multiprocessing.Queue()
+
+    with ThreadPoolExecutor(max_workers=GPUS) as executor:
+        tasks = []
+
+        for gpu in range(GPUS):
+            cmd = f"""{LC0_PATH} selfplay --player1.weights={save_path_p} --player2.weights={save_path_n} --openings-pgn={BOOK_PATH} --visits={NODES} --games={rounds_per_gpu*2} --mirror-openings=true --temperature=0 --noise-epsilon=0 --fpu-strategy=reduction --fpu-value=0.23 --fpu-strategy-at-root=absolute --fpu-value-at-root=1.0 --cpuct=1.32 --cpuct-at-root=1.9 --root-has-own-cpuct-params=true --policy-softmax-temp=1.4 --minibatch-size=256 --out-of-order-eval=true --max-collision-visits=9999 --max-collision-events=32 --cache-history-length=0 --smart-pruning-factor=1.33 --sticky-endgames=true --moves-left-max-effect=0.2 --moves-left-threshold=0.0 --moves-left-slope=0.007 --moves-left-quadratic-factor=0.85 --moves-left-scaled-factor=0.15 --moves-left-constant-factor=0.0  --openings-mode=random --parallelism=48 --backend=multiplexing --backend-opts=backend=cuda-auto,gpu={gpu}"""
+            tasks.append(executor.submit(run_cmd, cmd, results))
+
+        executor.shutdown(wait=True)
+
+        while True:
+            try:
+                item = results.get_nowait()
+                elo += item[0]
+                error += item[1]
+                total_npm += item[2]
+                n += 1
+            except:
+                break
+  
+        if (n > 0):
+            elo /= n
+            error /= n ** (3/2)
+            avg_npm = total_npm / n
+        print(f"elo: {elo:.2f}, error: {error:.2f}, avg npm: {avg_npm:.2f}")
+
+    print(f"Time elapsed: {time() - start_time:.2f} seconds")
+
+    if do_spsa:
+        for l, adj in zip(get_weights(orig_net.pb), adjustments):
+            weight = orig_net.denorm_layer_v2(l)
+            new_weight = weight + r * elo * adj
+            orig_net.fill_layer_v2(l, new_weight)
+
+        orig_net.save_proto(save_path)
+
 
 
 def get_weights(obj, weights=None):
-
-    return [net.nested_getattr(obj, "weights.policy.weights"),
-            # net.nested_getattr(obj, "weights.policy.biases"),
-            # net.nested_getattr(obj, "weights.policy1.weights"),
-            ]
     return [net.nested_getattr(obj, "weights.ip_pol_w"), net.nested_getattr(obj, "weights.ip_pol_b")]
 
-    if weights is None:
-        weights = []
-    if obj.DESCRIPTOR.name != "Layer":
-        print(obj.DESCRIPTOR.full_name)
-
-        print(dir(obj))
-    if obj.DESCRIPTOR.name == "Layer":
-        weights.append(obj)
-    for field_descriptor, value in obj.ListFields():
-        field_name = field_descriptor.name
-        # print(field_name)
-        if field_descriptor.type == field_descriptor.TYPE_MESSAGE:
-            if field_descriptor.label == field_descriptor.LABEL_REPEATED:
-                for nested_obj in value:
-                    get_weights(nested_obj, weights)
-            else:
-                get_weights(value, weights)
-    return weights
-
-
-def apply_spsa(net_path, save_path_p=None, save_path_n=None, c=3.0):
+def apply_spsa(net_path, save_path_p=None, save_path_n=None, c=PERTURBATION_SIZE):
     orig_net, positive_net, negative_net = Net(), Net(), Net()
     orig_net.parse_proto(net_path)
     positive_net.parse_proto(net_path)
@@ -82,7 +142,6 @@ def apply_spsa(net_path, save_path_p=None, save_path_n=None, c=3.0):
     assert len(positive_layers) == len(negative_layers) == len(adjustments) == len(np_weights)
 
     for pl, nl, adj, np_weights in zip(positive_layers, negative_layers, adjustments, np_weights):
-        print(np_weights.shape)
         positive_net.fill_layer_v2(pl, np_weights + adj)
         negative_net.fill_layer_v2(nl, np_weights - adj)
     
@@ -91,102 +150,23 @@ def apply_spsa(net_path, save_path_p=None, save_path_n=None, c=3.0):
 
     return orig_net, adjustments
 
-def do_iteration(net_path, save_path_p, save_path_n, save_path, r = 0.0005, do_spsa=True):
-    if do_spsa:
-        orig_net, adjustments = apply_spsa(net_path, save_path_p, save_path_n)
-
-
-    lc0_path = r"/home/privateclient/spsa/lc0/lc0"
-    cutechess_path = "/home/privateclient/spsa/cutechess/build/cutechess-cli"
-
-
-
-
-
-
-    rounds = 204
-    nodes = 64
-    gpus = 7
-
-    from time import time
-
-    rounds_per_gpu = rounds // gpus
-
-    start_time = time()
-
-    elo = 0
-    error = 0
-    n = 0
-
-    results    = multiprocessing.Queue()
-
-    with ThreadPoolExecutor(max_workers=gpus) as executor:
-        tasks = []
-
-        for gpu in range(gpus):
-        
-            options = f"{cutechess_path} -tournament gauntlet -rounds {rounds_per_gpu} -games 2 -concurrency 1 -tb /home/privateclient/spsa/syzygy -repeat -recover -openings file=/home/privateclient/spsa/opbooks/UHO_Lichess_4852_v1.epd format=epd order=random -resign movecount=2 score=400 twosided=true -draw movenumber=30 movecount=10 score=20"
-            each_options = f'-each proto=uci tc=inf nodes={nodes} option.VerboseMoveStats=false option.BackendOptions="gpu={gpu}"'
-            p_options = f"name=positive cmd={lc0_path} option.WeightsFile={save_path_p}"
-            n_options = f"name=negative cmd={lc0_path} option.WeightsFile={save_path_n}"
-            cmd = f"{options} -engine {p_options} -engine {n_options} {each_options} -pgnout games.pgn -debug"
-            
-            tasks.append(executor.submit(run_cmd, cmd, results))
-
-        executor.shutdown(wait=True)
-
-        while True:
-            try:
-                item = results.get_nowait()
-                elo += item[0]
-                error += item[1]
-                n += 1
-            except:
-                break
-  
-        if (n > 0):
-            elo /= n
-            error /= n ** (3/2)
-        print(f"elo: {elo}, error: {error}")
-            
-
-    #elo = 0 # this is where we would run the games
-
-    print(f"Time elapsed: {time() - start_time}")
-
-    if do_spsa:
-
-        for l, adj in zip(get_weights(orig_net.pb), adjustments):
-            weight = orig_net.denorm_layer_v2(l)
-            new_weight = weight + r * elo  * adj
-            orig_net.fill_layer_v2(l, new_weight)
-
-
-        orig_net.save_proto(save_path)
-
 
 if __name__ == "__main__":
     iteration = 0
-    ext = ".pb.gz"
-    base_name = "t74"
-    netdir = r"/home/privateclient/spsa/lc0/nets/"
     while True:
-        print(f"Iteration {iteration}:")
-        name = netdir + f"{base_name}-{iteration}"
+        print(f"\nIteration {iteration}:")
+        name = os.path.join(NET_DIR, f"{BASE_NAME}-{iteration}")
 
-        orig_path = name + ext
-        p_path = name + "-p" + ext
-        n_path = name + "-n" + ext
-        save_path = netdir + f"{base_name}-{iteration + 1}" + ext
+        orig_path = name + EXT
+        p_path = name + "-p" + EXT
+        n_path = name + "-n" + EXT
+        save_path = os.path.join(NET_DIR, f"{BASE_NAME}-{iteration + 1}" + EXT)
         do_iteration(orig_path, p_path, n_path, save_path)
         os.remove(p_path)
         os.remove(n_path)
 
-        if iteration % 5 == 0:
+        if iteration % TEST_INTERVAL == 0:
             print("TESTING VS ORIGINAL")
-            do_iteration("", name + ext, netdir + base_name + "-0" + ext, "", do_spsa=False)
-
+            do_iteration("", name + EXT, os.path.join(NET_DIR, BASE_NAME + "-0" + EXT), "", do_spsa=False)
 
         iteration += 1
-    #do_iteration(, netdir + "a.pb.gz", netdir + "b.pb.gz")
-
