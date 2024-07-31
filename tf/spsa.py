@@ -171,8 +171,8 @@ if __name__ == "__main__":
         os.remove(n_path)
 
         if iteration % TEST_INTERVAL == 0:
-            new_path = os.path.join(NET_DIR, BASE_NAME + "-0" + EXT)
-            old_path = name + EXT
+            new_path = name + EXT
+            old_path = os.path.join(NET_DIR, BASE_NAME + "-0" + EXT)
             print(f"\nTesting new {new_path} against old {old_path}")
             do_iteration("", new_path, old_path, "", do_spsa=False)
 
