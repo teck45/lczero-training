@@ -185,7 +185,7 @@ class Net:
         weights.insert(0, self.denorm_layer_v2(layer))
 
 
-    def save_proto(self, filename):
+    def save_proto(self, filename, log=True):
         """Save weights gzipped protobuf file"""
         if len(filename.split('.')) == 1:
             filename += ".pb.gz"
@@ -193,9 +193,10 @@ class Net:
         with gzip.open(filename, 'wb') as f:
             data = self.pb.SerializeToString()
             f.write(data)
-
-        size = os.path.getsize(filename) / 1024**2
-        print("Weights saved as '{}' {}M".format(filename, round(size, 2)))
+        
+        if log:
+            size = os.path.getsize(filename) / 1024**2
+            print("Weights saved as '{}' {}M".format(filename, round(size, 2)))
 
     def tf_name_to_pb_name(self, name):
         """Given Tensorflow variable name returns the protobuf name and index
