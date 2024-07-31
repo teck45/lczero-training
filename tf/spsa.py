@@ -23,6 +23,8 @@ parser.add_argument('--gpus', type=int, default=1, help='Number of GPUs')
 parser.add_argument('--learning_rate', type=float, default=0.002, help='Learning rate')
 parser.add_argument('--perturbation_size', type=float, default=1.0, help='Perturbation size')
 parser.add_argument('--test_interval', type=int, default=5, help='Interval for testing against original network')
+parser.add_argument('--start_iteration', type=int, default=0, help='Iteration to start tuning from')
+
 
 args = parser.parse_args()
 
@@ -38,6 +40,11 @@ GPUS = args.gpus
 LEARNING_RATE = args.learning_rate
 PERTURBATION_SIZE = args.perturbation_size
 TEST_INTERVAL = args.test_interval
+START_ITERATION = args.start_iteration
+
+if ROUNDS % GPUS != 0:
+    ROUNDS = (ROUNDS // GPUS) * GPUS
+    print("INFO: gpus does not divide rounds, reducing rounds accordingly")
 
 # Rest of the code remains the same
 def is_number(s):
@@ -72,9 +79,6 @@ def do_iteration(net_path, save_path_p, save_path_n, save_path, r=LEARNING_RATE,
         orig_net, adjustments = apply_spsa(net_path, save_path_p, save_path_n)
 
     rounds_per_gpu = ROUNDS // GPUS
-    total_rounds = rounds_per_gpu * GPUS  
-    print(f"Starting iteration with {total_rounds} rounds")
-
     start_time = time()
 
     elo = 0
@@ -152,9 +156,10 @@ def apply_spsa(net_path, save_path_p=None, save_path_n=None, c=PERTURBATION_SIZE
 
 
 if __name__ == "__main__":
-    iteration = 0
+    iteration = START_ITERATION
     while True:
-        print(f"\nIteration {iteration}:")
+        print(f"\nStarting iteration {iteration} with {ROUNDS} rounds")
+
         name = os.path.join(NET_DIR, f"{BASE_NAME}-{iteration}")
 
         orig_path = name + EXT
@@ -166,7 +171,9 @@ if __name__ == "__main__":
         os.remove(n_path)
 
         if iteration % TEST_INTERVAL == 0:
-            print("TESTING VS ORIGINAL")
-            do_iteration("", name + EXT, os.path.join(NET_DIR, BASE_NAME + "-0" + EXT), "", do_spsa=False)
+            new_path = os.path.join(NET_DIR, BASE_NAME + "-0" + EXT)
+            old_path = name + EXT
+            print(f"\nTesting new {new_path} against old {old_path}")
+            do_iteration("", new_path, old_path, "", do_spsa=False)
 
         iteration += 1
