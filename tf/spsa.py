@@ -6,7 +6,6 @@ import os
 from subprocess import Popen, PIPE
 import multiprocessing
 from concurrent.futures import ThreadPoolExecutor
-import sys
 from time import time, sleep
 import argparse
 from math import pow, sqrt, log, log10, copysign, pi
@@ -26,6 +25,8 @@ parser.add_argument('--perturbation_size', type=float, default=0.5, help='Pertur
 parser.add_argument('--test_interval', type=int, default=5, help='Interval for testing against original network')
 parser.add_argument('--start_iteration', type=int, default=0, help='Iteration to start tuning from')
 parser.add_argument('--syzygy', type=str, default="", help='Path to syzygy tablebase')
+parser.add_argument('--prof_name', type=str, default="", help='Where to dump log info')
+
 
 
 
@@ -45,6 +46,7 @@ PERTURBATION_SIZE = args.perturbation_size
 TEST_INTERVAL = args.test_interval
 START_ITERATION = args.start_iteration
 SYZYGY = args.syzygy
+PROF_NAME = args.prof_name
 
 if ROUNDS % GPUS != 0:
     ROUNDS = (ROUNDS // GPUS) * GPUS
@@ -167,11 +169,14 @@ def do_iteration(net_path, save_path_p, save_path_n, save_path, r=LEARNING_RATE,
             orig_net.fill_layer_v2(layer, new_weight)
 
         orig_net.save_proto(save_path, log=False)
+    
+    return mu
 
 
 
-def get_weights(obj, weights=None):
-    # return [net.nested_getattr(obj, "weights.ip_pol_w"), net.nested_getattr(obj, "weights.ip_pol_b")]
+def get_weights(lcnet, weights=None):
+    return [net.nested_getattr(lcnet, "weights.ip_pol_w"), net.nested_getattr(lcnet, "weights.ip_pol_b")]
+
     return [
         net.nested_getattr(obj, "weights.policy.weights"),
         net.nested_getattr(obj, "weights.policy.biases"),
@@ -209,6 +214,18 @@ def apply_spsa(net_path, save_path_p=None, save_path_n=None, c=PERTURBATION_SIZE
 
 if __name__ == "__main__":
     iteration = START_ITERATION
+
+    prof_name =  os.path.join(NET_DIR, PROF_NAME)
+    prof = None
+    if prof_name:
+        import pickle
+        # if the file exists, load it, otherwise set prof to an empty dictionary
+        if os.path.exists(prof_name):
+            with open(prof_name, 'rb') as f:
+                prof = pickle.load(f)
+        else:
+            prof = {"elo":{}}
+    
     while True:
         print(f"\nStarting iteration {iteration} with {ROUNDS} rounds")
 
@@ -226,6 +243,10 @@ if __name__ == "__main__":
             new_path = name + EXT
             old_path = os.path.join(NET_DIR, BASE_NAME + "-0" + EXT)
             print(f"\nTesting new {new_path} against old {old_path}")
-            do_iteration("", new_path, old_path, "", do_spsa=False)
+            this_elo = do_iteration("", new_path, old_path, "", do_spsa=False)
+            if prof is not None:
+                prof["elo"][iteration] = this_elo
+                with open(prof_name, 'wb') as f:
+                    pickle.dump(prof, f)
 
         iteration += 1
