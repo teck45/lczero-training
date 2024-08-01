@@ -223,7 +223,7 @@ if __name__ == "__main__":
 
     prof_name =  os.path.join(NET_DIR, PROF_NAME)
     prof = None
-    if prof_name:
+    if PROF_NAME:
         import pickle
         # if the file exists, load it, otherwise set prof to an empty dictionary
         if os.path.exists(prof_name):
