@@ -175,13 +175,19 @@ def do_iteration(net_path, save_path_p, save_path_n, save_path, r=LEARNING_RATE,
 
 
 def get_weights(lcnet, weights=None):
-    return [net.nested_getattr(lcnet, "weights.ip_pol_w"), net.nested_getattr(lcnet, "weights.ip_pol_b")]
+    dummy_net = Net()
+    out = [
+        # policy for transformer models
+        net.nested_getattr(lcnet, "weights.ip_pol_w"),
+        net.nested_getattr(lcnet, "weights.ip_pol_b"),
 
-    return [
-        net.nested_getattr(obj, "weights.policy.weights"),
-        net.nested_getattr(obj, "weights.policy.biases"),
-        # net.nested_getattr(obj, "weights.policy1.weights"),
-    ]
+        # policy for convolution-based models
+        net.nested_getattr(lcnet, "weights.policy.weights"),
+        net.nested_getattr(lcnet, "weights.policy.biases"),
+        
+        ]
+
+    return [layer for layer in out if dummy_net.denorm_layer_v2(layer).size > 0]
     
 
 
