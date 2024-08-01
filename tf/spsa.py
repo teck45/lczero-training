@@ -212,13 +212,9 @@ def apply_spsa(net_path, save_path_p=None, save_path_n=None, c=PERTURBATION_SIZE
     for pl, nl, adj, np_weights in zip(positive_layers, negative_layers, adjustments, np_weights):
         positive_net.fill_layer_v2(pl, np_weights + adj)
         negative_net.fill_layer_v2(nl, np_weights - adj)
-    
-    start_time = time()
 
     positive_net.save_proto(save_path_p, log=False, compresslevel=0)
     negative_net.save_proto(save_path_n, log=False, compresslevel=0)
-    print(time() - start_time)
-
 
     return orig_net, adjustments
 
