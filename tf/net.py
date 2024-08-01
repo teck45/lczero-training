@@ -185,12 +185,12 @@ class Net:
         weights.insert(0, self.denorm_layer_v2(layer))
 
 
-    def save_proto(self, filename, log=True):
+    def save_proto(self, filename, log=True, compresslevel=9):
         """Save weights gzipped protobuf file"""
         if len(filename.split('.')) == 1:
             filename += ".pb.gz"
 
-        with gzip.open(filename, 'wb') as f:
+        with gzip.open(filename, 'wb', compresslevel=compresslevel) as f:
             data = self.pb.SerializeToString()
             f.write(data)
         

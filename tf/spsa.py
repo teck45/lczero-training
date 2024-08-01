@@ -168,7 +168,8 @@ def do_iteration(net_path, save_path_p, save_path_n, save_path, r=LEARNING_RATE,
             new_weight = weight + r * mu * adj
             orig_net.fill_layer_v2(layer, new_weight)
 
-        orig_net.save_proto(save_path, log=False)
+        orig_net.save_proto(save_path, log=False, compresslevel=0)
+
     
     return mu
 
@@ -212,8 +213,12 @@ def apply_spsa(net_path, save_path_p=None, save_path_n=None, c=PERTURBATION_SIZE
         positive_net.fill_layer_v2(pl, np_weights + adj)
         negative_net.fill_layer_v2(nl, np_weights - adj)
     
-    positive_net.save_proto(save_path_p, log=False)
-    negative_net.save_proto(save_path_n, log=False)
+    start_time = time()
+
+    positive_net.save_proto(save_path_p, log=False, compresslevel=0)
+    negative_net.save_proto(save_path_n, log=False, compresslevel=0)
+    print(time() - start_time)
+
 
     return orig_net, adjustments
 
