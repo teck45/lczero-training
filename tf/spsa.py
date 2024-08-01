@@ -24,6 +24,8 @@ parser.add_argument('--learning_rate', type=float, default=0.002, help='Learning
 parser.add_argument('--perturbation_size', type=float, default=1.0, help='Perturbation size')
 parser.add_argument('--test_interval', type=int, default=5, help='Interval for testing against original network')
 parser.add_argument('--start_iteration', type=int, default=0, help='Iteration to start tuning from')
+parser.add_argument('--syzygy', type=str, default="", help='Path to syzygy tablebase')
+
 
 
 args = parser.parse_args()
@@ -41,6 +43,7 @@ LEARNING_RATE = args.learning_rate
 PERTURBATION_SIZE = args.perturbation_size
 TEST_INTERVAL = args.test_interval
 START_ITERATION = args.start_iteration
+SYZYGY = args.syzygy
 
 if ROUNDS % GPUS != 0:
     ROUNDS = (ROUNDS // GPUS) * GPUS
@@ -92,7 +95,9 @@ def do_iteration(net_path, save_path_p, save_path_n, save_path, r=LEARNING_RATE,
         tasks = []
 
         for gpu in range(GPUS):
-            cmd = f"""{LC0_PATH} selfplay --player1.weights={save_path_p} --player2.weights={save_path_n} --openings-pgn={BOOK_PATH} --visits={NODES} --games={rounds_per_gpu*2} --mirror-openings=true --temperature=0 --noise-epsilon=0 --fpu-strategy=reduction --fpu-value=0.23 --fpu-strategy-at-root=absolute --fpu-value-at-root=1.0 --cpuct=1.32 --cpuct-at-root=1.9 --root-has-own-cpuct-params=true --policy-softmax-temp=1.4 --minibatch-size=256 --out-of-order-eval=true --max-collision-visits=9999 --max-collision-events=32 --cache-history-length=0 --smart-pruning-factor=1.33 --sticky-endgames=true --moves-left-max-effect=0.2 --moves-left-threshold=0.0 --moves-left-slope=0.007 --moves-left-quadratic-factor=0.85 --moves-left-scaled-factor=0.15 --moves-left-constant-factor=0.0  --openings-mode=random --parallelism=48 --backend=multiplexing --backend-opts=backend=cuda-auto,gpu={gpu}"""
+            cmd = f"""{LC0_PATH} selfplay --player1.weights={save_path_p} --player2.weights={save_path_n} --openings-pgn={BOOK_PATH} --visits={NODES} --games={rounds_per_gpu*2} --mirror-openings=true --temperature=0 --noise-epsilon=0 --fpu-strategy=reduction --fpu-value=0.23 --fpu-strategy-at-root=absolute --fpu-value-at-root=1.0 --cpuct=1.32 --cpuct-at-root=1.9 --root-has-own-cpuct-params=true --policy-softmax-temp=1.4 --minibatch-size=256 --out-of-order-eval=true --max-collision-visits=9999 --max-collision-events=32 --cache-history-length=0 --smart-pruning-factor=1.33 --sticky-endgames=true --moves-left-max-effect=0.2 --moves-left-threshold=0.0 --moves-left-slope=0.007 --moves-left-quadratic-factor=0.85 --moves-left-scaled-factor=0.15 --moves-left-constant-factor=0.0  --openings-mode=random  --parallelism=48 --backend=multiplexing --backend-opts=backend=cuda-auto,gpu={gpu}"""
+            if SYZYGY:
+                cmd += f" --syzygy-paths={SYZYGY}"
             tasks.append(executor.submit(run_cmd, cmd, results))
 
         executor.shutdown(wait=True)
