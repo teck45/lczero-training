@@ -242,8 +242,10 @@ if __name__ == "__main__":
         n_path = name + "-n" + EXT
         save_path = os.path.join(NET_DIR, f"{BASE_NAME}-{iteration + 1}" + EXT)
         do_iteration(orig_path, p_path, n_path, save_path)
-        os.remove(p_path)
-        os.remove(n_path)
+        if os.path.exists(p_path):
+            os.remove(p_path)
+        if os.path.exists(n_path):
+            os.remove(n_path)
 
         if iteration % TEST_INTERVAL == 0:
             new_path = name + EXT
