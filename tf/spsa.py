@@ -7,8 +7,9 @@ from subprocess import Popen, PIPE
 import multiprocessing
 from concurrent.futures import ThreadPoolExecutor
 import sys
-from time import time
+from time import time, sleep
 import argparse
+from math import pow, sqrt, log, log10, copysign, pi
 
 # Parse command-line arguments
 parser = argparse.ArgumentParser(description='SPSA training script for Leela Chess Zero')
@@ -21,7 +22,7 @@ parser.add_argument('--rounds', type=int, default=150, help='Number of rounds')
 parser.add_argument('--nodes', type=int, default=64, help='Number of nodes')
 parser.add_argument('--gpus', type=int, default=1, help='Number of GPUs')
 parser.add_argument('--learning_rate', type=float, default=0.002, help='Learning rate')
-parser.add_argument('--perturbation_size', type=float, default=1.0, help='Perturbation size')
+parser.add_argument('--perturbation_size', type=float, default=0.5, help='Perturbation size')
 parser.add_argument('--test_interval', type=int, default=5, help='Interval for testing against original network')
 parser.add_argument('--start_iteration', type=int, default=0, help='Iteration to start tuning from')
 parser.add_argument('--syzygy', type=str, default="", help='Path to syzygy tablebase')
@@ -49,33 +50,69 @@ if ROUNDS % GPUS != 0:
     ROUNDS = (ROUNDS // GPUS) * GPUS
     print("INFO: gpus does not divide rounds, reducing rounds accordingly")
 
-# Rest of the code remains the same
-def is_number(s):
-    return s.lstrip('-').replace('.','',1).isdigit()
+# taken from https://github.com/jw1912/SPRT/blob/main/sprt.py
 
-def get_elo_and_npm(output):
-    elo, los, total_npm, npm_count = None, None, 0, 0
+def erf_inv(x):
+    a = 8 * (pi - 3) / (3 * pi * (4 - pi))
+    y = log(1 - x * x)
+    z = 2 / (pi * a) + y / 2
+    return copysign(sqrt(sqrt(z * z - y / a) - z), x)
+
+
+def phi_inv(p):
+    return sqrt(2)*erf_inv(2*p-1)
+
+
+def elo(score: float) -> float:
+    if score <= 0 or score >= 1:
+        return 0.0
+    return -400 * log10(1 / score - 1)
+
+
+def elo_wld(wins, losses, draws):
+    # win/loss/draw ratio
+    N = wins + losses + draws
+    if N == 0:
+        return (0, 0, 0)
+
+    p_w = float(wins) / N
+    p_l = float(losses) / N
+    p_d = float(draws) / N
+
+    mu = p_w + p_d/2
+    stdev = sqrt(p_w*(1-mu)**2 + p_l*(0-mu)**2 + p_d*(0.5-mu)**2) / sqrt(N)
+
+    # 95% confidence interval for mu
+    mu_min = mu + phi_inv(0.025) * stdev
+    mu_max = mu + phi_inv(0.975) * stdev
+
+    return (elo(mu_min), elo(mu), elo(mu_max))
+
+def get_wld_and_npm(output):
+    npm = None
+    wins, losses, draws = None, None, None
     for line in output.decode('utf-8').split('\n'):
         if line.startswith('tournamentstatus final'):
             parts = line.split()
             for i, part in enumerate(parts):
-                if part == 'Elo:':
-                    elo = float(parts[i+1])
-                    # Find the LOS value, which should be two parts after 'LOS:'
-                    los_index = parts.index('LOS:')
-                    los = float(parts[los_index + 1].rstrip('%'))
                 if part == 'npm':
-                    total_npm += float(parts[i+1])
-                    npm_count += 1
-    avg_npm = total_npm / npm_count if npm_count > 0 else 0
-    return elo, los, avg_npm
+                    npm = float(parts[i+1])
+            wins = int(parts[3])
+            losses = int(parts[4].replace('-', ''))
+            draws = int(parts[5].replace('=', ''))
+
+    if npm is not None:         
+        # return {'npm': npm, 'w': wins, 'l': losses, 'd': draws}
+        return (npm, wins, losses, draws)
+    else:
+        return None
 
 def run_cmd(command, results):
     process = Popen(command, shell=True, stdout=PIPE, stderr=PIPE)
     output, _ = process.communicate()
-    elo, error, npm = get_elo_and_npm(output)
-    if elo is not None:
-        results.put((elo, error, npm))
+    info = get_wld_and_npm(output)
+    if info is not None:
+        results.put(info)
 
 def do_iteration(net_path, save_path_p, save_path_n, save_path, r=LEARNING_RATE, do_spsa=True):
     if do_spsa:
@@ -84,9 +121,9 @@ def do_iteration(net_path, save_path_p, save_path_n, save_path, r=LEARNING_RATE,
     rounds_per_gpu = ROUNDS // GPUS
     start_time = time()
 
-    elo = 0
-    error = 0
+    w, l, d = 0, 0, 0
     total_npm = 0
+    avg_npm = -1
     n = 0
 
     results = multiprocessing.Queue()
@@ -104,34 +141,43 @@ def do_iteration(net_path, save_path_p, save_path_n, save_path, r=LEARNING_RATE,
 
         while True:
             try:
+                sleep(0.1)
                 item = results.get_nowait()
-                elo += item[0]
-                error += item[1]
-                total_npm += item[2]
+                total_npm += item[0]
+                w += item[1]
+                l += item[2]
+                d += item[3]
                 n += 1
             except:
                 break
   
         if (n > 0):
-            elo /= n
-            error /= n ** (3/2)
             avg_npm = total_npm / n
-        print(f"elo: {elo:.2f}, error: {error:.2f}, avg npm: {avg_npm:.2f}")
+        mu_min, mu, mu_max = elo_wld(w, l, d)
+        # print(f"{w=}, {l=}, {d=}, avg npm: {avg_npm:.2f}")
+        # print(f"elo: {mu:.2f}, ({mu_min:.2f}, {mu_max:.2f})")
+        print(f"elo: {mu:.2f} ± {mu_max - mu:.2f}, avg npm: {avg_npm:.2f}")
 
     print(f"Time elapsed: {time() - start_time:.2f} seconds")
 
     if do_spsa:
-        for l, adj in zip(get_weights(orig_net.pb), adjustments):
-            weight = orig_net.denorm_layer_v2(l)
-            new_weight = weight + r * elo * adj
-            orig_net.fill_layer_v2(l, new_weight)
+        for layer, adj in zip(get_weights(orig_net.pb), adjustments):
+            weight = orig_net.denorm_layer_v2(layer)
+            new_weight = weight + r * mu * adj
+            orig_net.fill_layer_v2(layer, new_weight)
 
         orig_net.save_proto(save_path, log=False)
 
 
 
 def get_weights(obj, weights=None):
-    return [net.nested_getattr(obj, "weights.ip_pol_w"), net.nested_getattr(obj, "weights.ip_pol_b")]
+    # return [net.nested_getattr(obj, "weights.ip_pol_w"), net.nested_getattr(obj, "weights.ip_pol_b")]
+    return [
+        net.nested_getattr(obj, "weights.policy.weights"),
+        net.nested_getattr(obj, "weights.policy.biases"),
+        net.nested_getattr(obj, "weights.policy1.weights"),
+    ]
+
 
 def apply_spsa(net_path, save_path_p=None, save_path_n=None, c=PERTURBATION_SIZE):
     orig_net, positive_net, negative_net = Net(), Net(), Net()
