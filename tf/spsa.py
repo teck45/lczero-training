@@ -9,6 +9,7 @@ from concurrent.futures import ThreadPoolExecutor
 from time import time, sleep
 import argparse
 from math import pow, sqrt, log, log10, copysign, pi
+from copy import deepcopy
 
 # Parse command-line arguments
 parser = argparse.ArgumentParser(description='SPSA training script for Leela Chess Zero')
@@ -193,10 +194,13 @@ def get_weights(lcnet, weights=None):
 
 
 def apply_spsa(net_path, save_path_p=None, save_path_n=None, c=PERTURBATION_SIZE):
-    orig_net, positive_net, negative_net = Net(), Net(), Net()
+    orig_net = Net()
+    start_time = time()
     orig_net.parse_proto(net_path)
-    positive_net.parse_proto(net_path)
-    negative_net.parse_proto(net_path)
+    positive_net = deepcopy(orig_net)
+    negative_net = deepcopy(orig_net)
+    print(time() - start_time)
+
     orig_layers = get_weights(orig_net.pb)
     np_weights = [orig_net.denorm_layer_v2(w) for w in orig_layers]
     stdevs = [np.std(w) for w in np_weights]
