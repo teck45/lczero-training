@@ -132,8 +132,8 @@ def do_iteration(net_path, save_path_p, save_path_n, save_path, r=LEARNING_RATE,
         tasks = []
 
         for gpu in range(GPUS):
-            cmd = f"""{LC0_PATH} selfplay --player1.weights={save_path_p} --player2.weights={save_path_n} --openings-pgn={BOOK_PATH} --visits={NODES} --games={rounds_per_gpu*2} --mirror-openings=true --temperature=0 --noise-epsilon=0 --fpu-strategy=reduction --fpu-value=0.23 --fpu-strategy-at-root=absolute --fpu-value-at-root=1.0 --cpuct=1.32 --cpuct-at-root=1.9 --root-has-own-cpuct-params=true --policy-softmax-temp=1.4 --minibatch-size=256 --out-of-order-eval=true --max-collision-visits=9999 --max-collision-events=32 --cache-history-length=0 --smart-pruning-factor=1.33 --sticky-endgames=true --moves-left-max-effect=0.2 --moves-left-threshold=0.0 --moves-left-slope=0.007 --moves-left-quadratic-factor=0.85 --moves-left-scaled-factor=0.15 --moves-left-constant-factor=0.0  --openings-mode=random  --parallelism=48 --backend=multiplexing --backend-opts=backend=cuda-auto,gpu={gpu}"""
-            if SYZYGY:
+            cmd = f"""{LC0_PATH} selfplay --player1.weights={save_path_p} --player2.weights={save_path_n} --openings-pgn={BOOK_PATH} --visits={NODES} --games={rounds_per_gpu*2} --mirror-openings=true --temperature=0 --noise-epsilon=0 --fpu-strategy=reduction --fpu-value=0.33 --fpu-strategy-at-root=reduction --fpu-value-at-root=0.33 --cpuct=1.75 --root-has-own-cpuct-params=false --policy-softmax-temp=1.36 --minibatch-size=32 --max-collision-visits=80000 --max-collision-events=917 --moves-left-max-effect=0.03 --moves-left-threshold=0.80 --moves-left-slope=0.0027  --moves-left-quadratic-factor=-0.65 --moves-left-scaled-factor=1.65 --moves-left-constant-factor=0.0 --threads=1 --task-workers=0 --no-share-trees --openings-mode=random  --parallelism=48 --backend=multiplexing --backend-opts=backend=cuda-auto,gpu={gpu}"""
+            if SYZYGY:   
                 cmd += f" --syzygy-paths={SYZYGY}"
             tasks.append(executor.submit(run_cmd, cmd, results))
 
@@ -175,8 +175,9 @@ def get_weights(obj, weights=None):
     return [
         net.nested_getattr(obj, "weights.policy.weights"),
         net.nested_getattr(obj, "weights.policy.biases"),
-        net.nested_getattr(obj, "weights.policy1.weights"),
+        # net.nested_getattr(obj, "weights.policy1.weights"),
     ]
+    
 
 
 def apply_spsa(net_path, save_path_p=None, save_path_n=None, c=PERTURBATION_SIZE):
