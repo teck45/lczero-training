@@ -23,7 +23,7 @@ parser.add_argument('--nodes', type=int, default=64, help='Number of nodes')
 parser.add_argument('--gpus', type=int, default=1, help='Number of GPUs')
 parser.add_argument('--learning_rate', type=float, default=0.002, help='Learning rate')
 parser.add_argument('--perturbation_size', type=float, default=0.5, help='Perturbation size')
-parser.add_argument('--test_interval', type=int, default=5, help='Interval for testing against original network')
+parser.add_argument('--test_interval', type=int, default=20, help='Interval for testing against original network')
 parser.add_argument('--start_iteration', type=int, default=0, help='Iteration to start tuning from')
 parser.add_argument('--syzygy', type=str, default="", help='Path to syzygy tablebase')
 parser.add_argument('--prof_name', type=str, default="", help='Where to dump log info')
@@ -118,6 +118,8 @@ def run_cmd(command, results):
         results.put(info)
 
 def do_iteration(net_path, save_path_p, save_path_n, save_path, r=LEARNING_RATE, do_spsa=True):
+
+    start_time = time()
     if do_spsa:
         orig_net, adjustments = apply_spsa(net_path, save_path_p, save_path_n)
 
@@ -178,11 +180,16 @@ def do_iteration(net_path, save_path_p, save_path_n, save_path, r=LEARNING_RATE,
 
 def get_weights(lcnet, weights=None):
     dummy_net = Net()
+
+
+
     out = [
-        # policy for transformer models
+        # policy for newer transformer models
+        net.nested_getattr(lcnet, "weights.policy_heads.ip_pol_w"),
+        net.nested_getattr(lcnet, "weights.policy_heads.ip_pol_b"),
+        # policy for older transformer models
         net.nested_getattr(lcnet, "weights.ip_pol_w"),
         net.nested_getattr(lcnet, "weights.ip_pol_b"),
-
         # policy for convolution-based models
         net.nested_getattr(lcnet, "weights.policy.weights"),
         net.nested_getattr(lcnet, "weights.policy.biases"),
@@ -199,10 +206,12 @@ def apply_spsa(net_path, save_path_p=None, save_path_n=None, c=PERTURBATION_SIZE
     orig_net.parse_proto(net_path)
     positive_net = deepcopy(orig_net)
     negative_net = deepcopy(orig_net)
-    print(time() - start_time)
 
     orig_layers = get_weights(orig_net.pb)
+    assert len(orig_layers) > 0, "Found no layers to tune."
+
     np_weights = [orig_net.denorm_layer_v2(w) for w in orig_layers]
+
     stdevs = [np.std(w) for w in np_weights]
     adjustments = []
     for w, stdev in zip(np_weights, stdevs):
