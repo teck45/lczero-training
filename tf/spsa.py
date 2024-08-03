@@ -27,6 +27,8 @@ parser.add_argument('--test_interval', type=int, default=20, help='Interval for 
 parser.add_argument('--start_iteration', type=int, default=0, help='Iteration to start tuning from')
 parser.add_argument('--syzygy', type=str, default="", help='Path to syzygy tablebase')
 parser.add_argument('--prof_name', type=str, default="", help='Where to dump log info')
+parser.add_argument('--weight_type', type=str, default="policy", help='Which weight type to tune: policy or value')
+
 
 
 
@@ -48,6 +50,7 @@ TEST_INTERVAL = args.test_interval
 START_ITERATION = args.start_iteration
 SYZYGY = args.syzygy
 PROF_NAME = args.prof_name
+WEIGHT_TYPE = args.weight_type
 
 if ROUNDS % GPUS != 0:
     ROUNDS = (ROUNDS // GPUS) * GPUS
@@ -181,20 +184,33 @@ def do_iteration(net_path, save_path_p, save_path_n, save_path, r=LEARNING_RATE,
 def get_weights(lcnet, weights=None):
     dummy_net = Net()
 
-
-
-    out = [
-        # policy for newer transformer models
-        net.nested_getattr(lcnet, "weights.policy_heads.ip_pol_w"),
-        net.nested_getattr(lcnet, "weights.policy_heads.ip_pol_b"),
-        # policy for older transformer models
-        net.nested_getattr(lcnet, "weights.ip_pol_w"),
-        net.nested_getattr(lcnet, "weights.ip_pol_b"),
-        # policy for convolution-based models
-        net.nested_getattr(lcnet, "weights.policy.weights"),
-        net.nested_getattr(lcnet, "weights.policy.biases"),
-        
+    if WEIGHT_TYPE == "policy":
+        # to tune policy head
+        weight_names = [
+            "weights.policy_heads.ip_pol_w",
+            "weights.policy_heads.ip_pol_b",
+            "weights.ip_pol_w",
+            "weights.ip_pol_b",
+            "weights.policy.weights",
+            "weights.policy.biases",
         ]
+    
+    elif WEIGHT_TYPE == "value":
+        # to tune value head
+        weight_names = [
+            "weights.ip_val_w",
+            "weights.ip_val_b",
+            "weights.value_heads.winner.ip_val_w",
+            "weights.value_heads.winner.ip_val_b",
+        ]
+    
+    else:
+        raise ValueError(f"Unrecognized weight_type {WEIGHT_TYPE}, expected 'policy' or 'value'")
+
+    out = [net.nested_getattr(lcnet, weight_name) for weight_name in weight_names]
+
+
+    
 
     return [layer for layer in out if dummy_net.denorm_layer_v2(layer).size > 0]
     
