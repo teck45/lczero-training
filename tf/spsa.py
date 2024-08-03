@@ -12,22 +12,22 @@ from math import pow, sqrt, log, log10, copysign, pi
 from copy import deepcopy
 
 # Parse command-line arguments
-parser = argparse.ArgumentParser(description='SPSA training script for Leela Chess Zero')
-parser.add_argument('lc0_path', help='Path to lc0 executable')
-parser.add_argument('book_path', help='Path to opening book')
-parser.add_argument('net_dir', help='Directory for network files')
-parser.add_argument('base_name', help='Base name for network files')
-parser.add_argument('--ext', default=".pb.gz", help='File extension for network files')
-parser.add_argument('--rounds', type=int, default=150, help='Number of rounds')
-parser.add_argument('--nodes', type=int, default=64, help='Number of nodes')
-parser.add_argument('--gpus', type=int, default=1, help='Number of GPUs')
-parser.add_argument('--learning_rate', type=float, default=0.002, help='Learning rate')
-parser.add_argument('--perturbation_size', type=float, default=0.5, help='Perturbation size')
-parser.add_argument('--test_interval', type=int, default=20, help='Interval for testing against original network')
-parser.add_argument('--start_iteration', type=int, default=0, help='Iteration to start tuning from')
-parser.add_argument('--syzygy', type=str, default="", help='Path to syzygy tablebase')
-parser.add_argument('--prof_name', type=str, default="", help='Where to dump log info')
-parser.add_argument('--weight_type', type=str, default="policy", help='Which weight type to tune: policy or value')
+parser = argparse.ArgumentParser(description="SPSA training script for Leela Chess Zero")
+parser.add_argument("lc0_path", help="Path to lc0 executable")
+parser.add_argument("book_path", help="Path to opening book")
+parser.add_argument("net_dir", help="Directory for network files")
+parser.add_argument("base_name", help="Base name for network files")
+parser.add_argument("--ext", default=".pb.gz", help="File extension for network files")
+parser.add_argument("--rounds", type=int, default=150, help="Number of rounds")
+parser.add_argument("--nodes", type=int, default=64, help="Number of nodes")
+parser.add_argument("--gpus", type=int, default=1, help="Number of GPUs")
+parser.add_argument("--learning_rate", type=float, default=0.002, help="Learning rate")
+parser.add_argument("--perturbation_size", type=float, default=0.5, help="Perturbation size")
+parser.add_argument("--test_interval", type=int, default=20, help="Interval for testing against original network")
+parser.add_argument("--start_iteration", type=int, default=0, help="Iteration to start tuning from")
+parser.add_argument("--syzygy", type=str, default="", help="Path to syzygy tablebase")
+parser.add_argument("--prof_name", type=str, default="", help="Where to dump log info")
+parser.add_argument("--weight_type", type=str, default="policy", help="Which weight type to tune: policy or value")
 
 
 
@@ -97,18 +97,18 @@ def elo_wld(wins, losses, draws):
 def get_wld_and_npm(output):
     npm = None
     wins, losses, draws = None, None, None
-    for line in output.decode('utf-8').split('\n'):
-        if line.startswith('tournamentstatus final'):
+    for line in output.decode("utf-8").split("\n"):
+        if line.startswith("tournamentstatus final"):
             parts = line.split()
             for i, part in enumerate(parts):
-                if part == 'npm':
+                if part == "npm":
                     npm = float(parts[i+1])
             wins = int(parts[3])
-            losses = int(parts[4].replace('-', ''))
-            draws = int(parts[5].replace('=', ''))
+            losses = int(parts[4].replace("-", ""))
+            draws = int(parts[5].replace("=", ""))
 
     if npm is not None:         
-        # return {'npm': npm, 'w': wins, 'l': losses, 'd': draws}
+        # return {"npm": npm, "w": wins, "l": losses, "d": draws}
         return (npm, wins, losses, draws)
     else:
         return None
@@ -257,7 +257,7 @@ if __name__ == "__main__":
         import pickle
         # if the file exists, load it, otherwise set prof to an empty dictionary
         if os.path.exists(prof_name):
-            with open(prof_name, 'rb') as f:
+            with open(prof_name, "rb") as f:
                 prof = pickle.load(f)
         else:
             prof = {"elo":{}}
@@ -284,7 +284,7 @@ if __name__ == "__main__":
             this_elo = do_iteration("", new_path, old_path, "", do_spsa=False)
             if prof is not None:
                 prof["elo"][iteration] = this_elo
-                with open(prof_name, 'wb') as f:
+                with open(prof_name, "wb") as f:
                     pickle.dump(prof, f)
 
         iteration += 1
