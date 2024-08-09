@@ -94,6 +94,10 @@ def elo_wld(wins, losses, draws):
 
     return (elo(mu_min), elo(mu), elo(mu_max))
 
+
+def clamp(x, lo, hi):
+    return max(lo, min(x, hi))
+
 def get_wld_and_npm(output):
     npm = None
     wins, losses, draws = None, None, None
@@ -171,7 +175,7 @@ def do_iteration(net_path, save_path_p, save_path_n, save_path, r=LEARNING_RATE,
     if do_spsa:
         for layer, adj in zip(get_weights(orig_net.pb), adjustments):
             weight = orig_net.denorm_layer_v2(layer)
-            new_weight = weight + r * mu * adj
+            new_weight = weight + r * clamp(mu, -30, 30) * adj
             orig_net.fill_layer_v2(layer, new_weight)
 
         orig_net.save_proto(save_path, log=False, compresslevel=0)
