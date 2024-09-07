@@ -164,12 +164,14 @@ class ChunkParser:
                  diff_focus_slope=0,
                  diff_focus_q_weight=6.0,
                  diff_focus_pol_scale=3.5,
+                 pc_min=None,
+                 pc_max=None,
                  workers=None):
         self.inner = ChunkParserInner(self, chunks, expected_input_format,
                                       shuffle_size, sample, buffer_size,
                                       batch_size, diff_focus_min,
                                       diff_focus_slope, diff_focus_q_weight,
-                                      diff_focus_pol_scale, workers)
+                                      diff_focus_pol_scale, workers, pc_min, pc_max)
 
     def shutdown(self):
         """
@@ -375,8 +377,8 @@ def convert_v7b_to_tuple(content):
 class ChunkParserInner:
     def __init__(self, parent, chunks, expected_input_format, shuffle_size,
                  sample, buffer_size, batch_size, diff_focus_min,
-                 diff_focus_slope, diff_focus_q_weight, diff_focus_pol_scale,
-                 workers):
+                 diff_focus_slope, diff_focus_q_weight, diff_focus_pol_scale, 
+                 workers, pc_min=None, pc_max=None):
         """
         Read data and yield batches of raw tensors.
 
@@ -410,6 +412,8 @@ class ChunkParserInner:
         self.diff_focus_slope = diff_focus_slope
         self.diff_focus_q_weight = diff_focus_q_weight
         self.diff_focus_pol_scale = diff_focus_pol_scale
+        self.pc_min = pc_min
+        self.pc_max = pc_max
         # set the mini-batch size
         self.batch_size = batch_size
         # set number of elements in the shuffle buffer.
@@ -500,6 +504,22 @@ class ChunkParserInner:
                 pol_kld = struct.unpack("f", record[8348:8352])[0]
 
                 # if orig_q is NaN or pol_kld is 0, accept, else accept based on diff focus
+
+                try:
+                    if self.pc_min is not None or self.pc_max is not None:
+                        
+                        planes = record[7440: 7440+104]
+                        planes = np.unpackbits(np.frombuffer(planes, dtype=np.uint8)).astype(np.uint8)
+                        planes = np.reshape(planes, [13, 64])
+                        # pieces are listed our PNBRQKpnbrqk
+                        pc = np.sum(planes[1:5, :]) + np.sum(planes[7:11, :])
+                        if self.pc_min is not None and pc < self.pc_min:
+                            continue
+                        if self.pc_max is not None and pc > self.pc_max:
+                            continue
+                except Exception as e:
+                    print(e)
+
                 if not np.isnan(orig_q) and pol_kld > 0:
                     diff_q = abs(best_q - orig_q)
                     q_weight = self.diff_focus_q_weight
@@ -899,93 +919,3 @@ def rescore(filenames, n_workers=16, n_jobs=1000, **kwargs):
                 # raise any errors:
                 for future in futures:
                     future.result()
-
-
-def ascii_board(bitboard, bn=0):
-    board = [['.'] * 8 for i in range(8)]
-    planes = np.frombuffer(bitboard, dtype=np.float32)
-    planes = np.reshape(planes, [112, 64])
-    planes = planes[13*bn:13*(bn+1)]
-    planes = np.transpose(planes, [1,0])
-    for square in planes:
-        if square[12] != 0:
-            print(planes)
-            break
-
-
-
-
-def sample_record(chunkdata):
-    """
-    Randomly sample through the v3/4/5/6/7 chunk data and select records in v6 format
-    Downsampling to avoid highly correlated positions skips most records, and
-    diff focus may also skip some records.
-    """
-    version = chunkdata[0:4]
-    record_size = struct_sizes.get(version, None)
-    if record_size is None:
-        return
-    
-    n_chunks = len(chunkdata) // record_size
-    if n_chunks == 0:
-        return
-    
-    probs = [chunkdata[i + 8:i + 8 + 1858 * 4] for i in range(0, len(chunkdata), record_size)]
-    # if there is a single legal move then the loss will be 0, so pick an arbitrary move
-    probs.extend(n_future_probs * [struct.pack("f", 1.0) + struct.pack("f", -1.0) * 1857]) 
-
-    ppb=12
-    white_boards = b""
-    black_boards = b""
-
-    for i in range(n_chunks):
-        start = i*record_size
-        plane = chunkdata[start + 7440:start + 7440 + 8 * ppb]
-        if i % 2 == 0: # this board is from white's perspective
-            white_boards += plane
-            black_boards += reverse_board(plane)
-        else:
-            white_boards += reverse_board(plane)
-            black_boards += plane
-    white_boards += white_boards[-8*ppb:] * n_future_boards # history is the final position if game over
-    black_boards += black_boards[-8*ppb:] * n_future_boards
-    
-
-    for i in range(0, len(chunkdata), record_size):
-        
-        idx = i//record_size
-        record = chunkdata[i:i + record_size]
-    
-
-        record += b"".join(probs[idx + 1: idx + 1 + n_future_probs])
-        boards = white_boards if idx % 2 == 0 else black_boards
-        record += boards[8 * ppb * (idx+1):8 * ppb * (1+idx + n_future_boards)]
-
-
-        yield record
-
-    
-def gen(filename):
-    
-    with gzip.open(filename, "rb") as chunk_file:
-        version = chunk_file.read(4)
-        chunk_file.seek(0)
-        if version == b'':
-            return
-        record_size = struct_sizes.get(version, None)
-        if record_size is None:
-            print("Unknown version {} in file {}".format(
-                version, filename))
-            return
-        chunkdata = chunk_file.read()
-        i = 0
-        for item in sample_record(chunkdata):
-            (planes, probs, winner, root_wdl, plies_left, st_wdl, opp_probs, next_probs, fut) = convert_v7b_to_tuple(item)
-            ascii_board(planes)
-
-            
-if __name__ == '__main__':
-    import glob
-    for d in glob.glob("/mnt/trainingdata-rescored/validation-data/*.gz"):
-        print(d)
-        gen(d)

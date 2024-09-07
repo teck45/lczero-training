@@ -41,7 +41,7 @@ def fast_get_chunks(d):
     fo_chunknames = []
     subdirs = os.listdir(d)
     chunkfiles_name = "chunknames.pkl"
-    if chunkfiles_name in subdirs:
+    if False and chunkfiles_name in subdirs: # TODO: remove False
         print(f"Using cached {d + chunkfiles_name}" )
         with open(d + chunkfiles_name, 'rb') as f:
             chunknames = pickle.load(f)
@@ -206,6 +206,8 @@ def main(cmd):
     diff_focus_slope = cfg["training"].get("diff_focus_slope", 0)
     diff_focus_q_weight = cfg["training"].get("diff_focus_q_weight", 6.0)
     diff_focus_pol_scale = cfg["training"].get("diff_focus_pol_scale", 3.5)
+    pc_min = cfg["dataset"].get("pc_min")
+    pc_max = cfg["dataset"].get("pc_max")
 
     root_dir = os.path.join(cfg["training"]["path"], cfg["name"])
     if not os.path.exists(root_dir):
@@ -220,6 +222,8 @@ def main(cmd):
                                diff_focus_slope=diff_focus_slope,
                                diff_focus_q_weight=diff_focus_q_weight,
                                diff_focus_pol_scale=diff_focus_pol_scale,
+                               pc_min=pc_min,
+                               pc_max=pc_max,
                                workers=train_workers)
     test_shuffle_size = int(shuffle_size * (1.0 - train_ratio))
     # no diff focus for test_parser
@@ -228,6 +232,8 @@ def main(cmd):
                               shuffle_size=test_shuffle_size,
                               sample=SKIP,
                               batch_size=split_batch_size,
+                            #   pc_min=pc_min,
+                            #   pc_max=pc_max,
                               workers=test_workers)
     
     
@@ -237,6 +243,8 @@ def main(cmd):
                                         get_input_mode(cfg),
                                         sample=1,
                                         batch_size=split_batch_size,
+                                        # pc_min=pc_min,
+                                        # pc_max=pc_max,
                                         workers=0)
 
     import tensorflow as tf
