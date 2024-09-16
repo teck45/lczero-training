@@ -212,7 +212,7 @@ class DenseLayer(tf.keras.layers.Layer):
             if self.use_rep_quant:
                 kernel = kernel / (input_step + 1e-5)
 
-        out = gradient_checkpointed_matmul(x, kernel)
+        out = x @ kernel
         if self.use_bias:
             out = tf.add(out, self.bias)
         return self.activation(out)
