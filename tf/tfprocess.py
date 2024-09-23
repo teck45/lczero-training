@@ -2219,7 +2219,7 @@ class TFProcess:
                 scale=beta, mode="fan_avg", distribution="truncated_normal", seed=42)
 
             # feed-forward network
-            ffn_output = self.ffn(flow, self.embedding_size, self.encoder_dff,
+            ffn_output, activations = self.ffn(flow, self.embedding_size, self.encoder_dff,
                                   xavier_norm, name=name + "embedding/ffn")
 
 
