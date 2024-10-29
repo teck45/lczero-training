@@ -8,7 +8,7 @@ dataset:
   train_ratio: 0.95
   sort_type: name
   input_train: 
-    - '/mnt/t82data/training-run1-test80-202309*/'
+    - '/mnt/t82data/training-run1-test80-202309/*/'
   input_test:
     - '/mnt/testdata/*/'
   # input_validation:
